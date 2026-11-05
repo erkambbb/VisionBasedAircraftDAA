@@ -71,3 +71,14 @@ def test_bbox_loose_keeps_big_closeup_but_rejects_edge_sliver():
     assert bbox_loose(sliver, np.array([True, True]), sw, sh) is None
     behind = np.array([[0, 0], [100, 100]], float)
     assert bbox_loose(behind, np.array([True, False]), sw, sh) is None
+
+
+def test_edge_angles_put_uav_on_picture_edge_inside_raw_frame():
+    import math
+    rng = np.random.default_rng(0)
+    for _ in range(300):
+        h, v = fc.edge_angles(rng, 1.0, 2.0, 29.36, 16.7, 34.0, 50.0, 2.0)
+        assert abs(h) <= 17.0 and abs(v) <= 9.9
+        spread = math.degrees(math.atan2(2.0, 50.0))
+        assert (h, v)[0] == 1.0 or abs(abs(h) - 14.68) <= spread
+        assert (h != 1.0) != (v != 2.0)

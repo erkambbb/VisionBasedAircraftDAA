@@ -219,7 +219,7 @@ def live_geom(client, sw, sh, hull):
     x, y, z, psi, the, phi = (r[0] for r in v[:6])
     pts = body_points_ogl(hull, (x, y, z), psi, the, phi)
     px, front = project_points(pts, v[6], v[7], sw, sh)
-    box = bbox_loose(px, front, sw, sh)
+    box = bbox_loose(px, front, sw, sh, min_visible=0.01)
     poly = None
     if box is not None:
         poly = cv2.convexHull(px.astype(np.float32)).reshape(-1, 2)
@@ -258,6 +258,7 @@ def poly_mask(poly, sw, sh, roi):
 DIFF_THR = 10
 EDGE_TOL_PX = 3.0              # every box edge must match the geometric box within this ...
 EDGE_TOL_REL = 0.04            # ... or this share of the box size on that axis (raw pixels)
+MIN_VISIBLE_PX = 3.0           # a cut UAV needs at least this much on both sides (output pixels)
 MAX_OUTSIDE = 0.02             # share of the frame that may differ outside the UAV (scene not settled)
 MIN_SETTLE_FRAMES, MAX_SETTLE_FRAMES = 3, 30
 MIN_SETTLE_S, MAX_SETTLE_S = 0.08, 1.0
@@ -270,15 +271,44 @@ def geometric_clipped(geo, sw, sh):
     return ((x0 + x1) / 2, (y0 + y1) / 2, max(x1 - x0, 1e-3), max(y1 - y0, 1e-3))
 
 
-def edges_agree(box, geo):
-    """True if all four edges of the pixel box sit on the geometric box. Two independent sources
-    agreeing edge by edge means no shadow widened the box and no part of the UAV was missed."""
+def edges_agree(box, geo, sw, sh):
+    """True if the pixel box sits on the geometric box, edge by edge. Two independent sources
+    agreeing means no shadow widened the box and no part of the UAV was missed. Where the raw
+    frame cuts the UAV the pixels must reach that edge; the other sides may only be smaller,
+    because the visible part of a cut UAV can be shorter than the whole UAV."""
     tx = max(EDGE_TOL_PX, EDGE_TOL_REL * geo[2])
     ty = max(EDGE_TOL_PX, EDGE_TOL_REL * geo[3])
-    return (abs((box[0] - box[2] / 2) - (geo[0] - geo[2] / 2)) <= tx
-            and abs((box[0] + box[2] / 2) - (geo[0] + geo[2] / 2)) <= tx
-            and abs((box[1] - box[3] / 2) - (geo[1] - geo[3] / 2)) <= ty
-            and abs((box[1] + box[3] / 2) - (geo[1] + geo[3] / 2)) <= ty)
+    b = (box[0] - box[2] / 2, box[1] - box[3] / 2, box[0] + box[2] / 2, box[1] + box[3] / 2)
+    g = (geo[0] - geo[2] / 2, geo[1] - geo[3] / 2, geo[0] + geo[2] / 2, geo[1] + geo[3] / 2)
+    tol = (tx, ty, tx, ty)
+    cut = (g[0] <= 0.5, g[1] <= 0.5, g[2] >= sw - 0.5, g[3] >= sh - 0.5)
+    if not any(cut):
+        return all(abs(p - q) <= t for p, q, t in zip(b, g, tol))
+    inside = b[0] >= g[0] - tx and b[1] >= g[1] - ty and b[2] <= g[2] + tx and b[3] <= g[3] + ty
+    return inside and all(abs(p - q) <= t for p, q, t, c in zip(b, g, tol, cut) if c)
+
+
+def crop_mask(args, sw, sh):
+    """0/1 mask of the raw pixels that reach the camera picture (rpi-cam-style crop + lens distortion)."""
+    sys.path.insert(0, os.path.expanduser(args.camstyle_dir))
+    from camstyle.core import CamStyleParams, Geometry
+    ow, oh = args.out_size
+    g = Geometry(sh, sw, CamStyleParams(focal_mm=args.focal_mm, source_hfov_deg=args.xp_hfov,
+                                        out_width=ow, out_height=oh))
+    ox, oy = g.src_to_out(*np.meshgrid(np.arange(sw, dtype=float), np.arange(sh, dtype=float)))
+    return ((ox >= 0) & (ox <= ow - 1) & (oy >= 0) & (oy <= oh - 1)).astype(np.uint8)
+
+
+def visible_box(a, b, box, roi, mask, crop, sw, sh):
+    """Box of the UAV pixels that reach the camera picture, or None if none do. Cutting the whole
+    box instead would stay too tall or wide: the part outside the picture still shapes it."""
+    if crop is None:
+        return box
+    x0, y0 = max(int(box[0] - box[2] / 2) - 1, 0), max(int(box[1] - box[3] / 2) - 1, 0)
+    x1, y1 = min(int(box[0] + box[2] / 2) + 2, sw), min(int(box[1] + box[3] / 2) + 2, sh)
+    if crop[y0:y1, x0:x1].all():
+        return box
+    return diff_bbox(a, b, roi, sw, sh, mask & crop)
 
 
 def outside_share(a, b, mask):
@@ -330,6 +360,8 @@ def sample_state(rng, info, args):
     d_surf, d_cen = fc.sample_distance(rng, info.radius, info.extent, args.min_px)
     vang = rng.uniform(-args.vfov / 2, args.vfov / 2)
     hang = rng.uniform(-args.hfov / 2, args.hfov / 2)
+    if rng.random() < fc.EDGE_FRACTION:
+        hang, vang = fc.edge_angles(rng, hang, vang, args.hfov, args.vfov, args.xp_hfov, d_cen, info.radius)
     intr = gtd.get_intruder_position(own, d_cen, hang, vang, rng.uniform(0, 360))
     if intr.u < MIN_CLEAR_M:
         return None
@@ -489,7 +521,7 @@ def run_model(ctx, idx, name, info):
             if saved == 0 and rejects["nodiff"] >= 12:
                 raise RuntimeError(f"{name}: UAV ekranda görünmüyor (model yüklenmemiş olabilir)")
             continue
-        if not edges_agree(bbox, geometric_clipped(geo, ctx.sw, ctx.sh)):
+        if not edges_agree(bbox, geometric_clipped(geo, ctx.sw, ctx.sh), ctx.sw, ctx.sh):
             rejects["mismatch"] += 1                  # pixels and geometry disagree: do not trust the box
             if saved == 0 and rejects["mismatch"] >= 60:
                 raise RuntimeError(f"{name}: piksel kutusu geometriyle hiç uyuşmuyor")
@@ -500,6 +532,11 @@ def run_model(ctx, idx, name, info):
             continue
         geo_dx, geo_dy = bbox[0] - geo[0], bbox[1] - geo[1]
         offs.append((geo_dx, geo_dy))
+        bbox = visible_box(frame, empty, bbox, geo, mask, ctx.crop, ctx.sw, ctx.sh)
+        if bbox is None or min(fc.bbox_out_px(bbox, ctx.sw, ctx.hfov_meas)) < MIN_VISIBLE_PX:
+            rejects["outside"] = rejects.get("outside", 0) + 1     # no UAV in the camera picture
+            continue
+        ow, oh = fc.bbox_out_px(bbox, ctx.sw, ctx.hfov_meas)
 
         split = "train" if saved < n_train else "valid"
         fn = f"u{idx:03d}_{saved:03d}"
@@ -576,7 +613,7 @@ def post_process(args, log):
                "--wb", "1.05,1.0,0.93", "--haze", "0", "--haze-uniform", "0.07",
                "--saturation", "1.0", "--contrast", "0.95", "--blur", "0.4",
                "--photon-scale", "1500", "--read-noise", "0.006", "--jpeg-quality", "70",
-               "--jitter", "0.5", "--seed", str(i)]
+               "--jitter", "0.5", "--seed", str(i), "--min-visible", "0"]
         out = open(shard + ".log", "w")
         procs.append((shard, out, subprocess.Popen(cmd, cwd=os.path.expanduser(args.camstyle_dir), env=env,
                                                    stdout=out, stderr=subprocess.STDOUT)))
@@ -684,7 +721,7 @@ def main():
                                 switcher=Switcher(args.xp_dir), root=root, csv_path=csv_path, screen=screen,
                                 sw=sw, sh=sh, hfov_meas=round(meas, 3), total_saved=0, win_id=win_id,
                                 labels_removed=0, last_check=time.time(), recent=[],
-                                period=0.05, settle=6, good=0)
+                                period=0.05, settle=6, good=0, crop=crop_mask(args, sw, sh))
     log(f"ekran {sw}x{sh}, render FOV {meas:.2f} derece")
 
     for name in names:

@@ -16,6 +16,7 @@ FT = 0.3048
 NEAR_FRACTION = 0.10                    # share of frames close to the camera
 NEAR_RANGE_M = (0.1, 5.0)               # distance from camera to the nearest surface
 FAR_RANGE_M = (5.0, 300.0)
+EDGE_FRACTION = 0.15                    # share of frames with the UAV cut by the picture edge
 # make_fleet_acfs.py uses the shadow_twin_boom template: its CG (the position X-Plane reports)
 # is 3.3 ft aft and 0.3 ft above the OBJ origin. Body points are taken relative to the CG.
 CG_OFFSET_M = (0.0, 0.3 * 0.3048, 3.3 * 0.3048)
@@ -92,6 +93,17 @@ def sample_distance(rng, radius, extent, min_px=8.0):
         lo, hi = FAR_RANGE_M[0], far_limit_m(extent, min_px)
     d = float(math.exp(rng.uniform(math.log(lo), math.log(hi))))
     return d, d + radius
+
+
+def edge_angles(rng, hang, vang, hfov, vfov, raw_hfov, d_center, radius):
+    """(hang, vang) with the UAV on a random edge of the camera picture: partly in, partly out,
+    like an aircraft entering or leaving the frame. Stays inside the wider raw frame."""
+    spread = math.degrees(math.atan2(radius, d_center)) * rng.uniform(-0.8, 0.8)
+    side = 1.0 if rng.random() < 0.5 else -1.0
+    if rng.random() < 0.5:
+        return float(np.clip(side * (hfov / 2 + spread), -raw_hfov / 2, raw_hfov / 2)), vang
+    raw_vhalf = math.degrees(math.atan(math.tan(math.radians(raw_hfov) / 2) * 9 / 16))
+    return hang, float(np.clip(side * (vfov / 2 + spread), -raw_vhalf, raw_vhalf))
 
 
 def sample_altitude_m(rng):

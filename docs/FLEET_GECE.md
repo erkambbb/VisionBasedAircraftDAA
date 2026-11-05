@@ -32,6 +32,9 @@ varsayılan veri seti yerine `-d` ile veri seti verilerek çalıştırılmalı.
   Uymazsa (`mismatch`) kare atılır. Böylece kutu ne geniş kalır ne de uçağın bir parçasını dışarıda bırakır.
 - İki kare farklı sahne gösteriyorsa (UAV dışında karenin %2'sinden fazlası değişmişse, `unstable`) kare atılır.
 - Yazı UAV üstündeyse (`label`) kare atılır.
+- Kadraj kenarında kesilen uçaklar silinmez. Karelerin yaklaşık %15'inde uçak bilerek kenara konur (kareye giren ya da çıkan uçak).
+  Kutu yalnız kameraya giren uçak piksellerinden çıkar, görünen parçayı sarar. Ham setin etiketi de bu görünen kutudur.
+- Kameraya hiç girmeyen ya da 3 pikselden az görünen uçakta kare atılır (`outside`).
 
 ## Model dosyaları (bir kez)
 `plane_models/` içindeki `.acf` dosyaları X-Plane'in istediği alanlardan yoksun ("Vne of zero" hatasıyla X-Plane kapanıyor).
