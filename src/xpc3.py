@@ -35,7 +35,7 @@ class XPlaneConnect(object):
         self.xpDst = (xpIP, xpPort)
 
         # Create and bind socket
-        clientAddr = ("0.0.0.0", port)
+        clientAddr = ("127.0.0.1" if xpIP.startswith("127.") else "0.0.0.0", port)  # local X-Plane: no datagrams from the network
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         self.socket.bind(clientAddr)
         timeout /= 1000.0
@@ -87,7 +87,7 @@ class XPlaneConnect(object):
         self.sendUDP(buffer)
 
         #Rebind socket
-        clientAddr = ("0.0.0.0", port)
+        clientAddr = ("127.0.0.1" if xpIP.startswith("127.") else "0.0.0.0", port)  # local X-Plane: no datagrams from the network
         timeout = self.socket.gettimeout()
         self.socket.close()
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)

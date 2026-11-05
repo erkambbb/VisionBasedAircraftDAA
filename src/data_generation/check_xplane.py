@@ -6,6 +6,7 @@ Exit: 0 ok, 1 connection/version, 2 stale frame, 3 black frame.
 import argparse
 import os
 import sys
+import tempfile
 import time
 
 import cv2
@@ -24,10 +25,12 @@ def grab(sct, monitor):
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--hfov", type=float, default=None)
-    ap.add_argument("--save-dir", default="/tmp/xp_check")
+    ap.add_argument("--save-dir", default=None, help="default: a new private temp folder")
     ap.add_argument("--monitor", type=int, default=1)
     a = ap.parse_args(argv)
+    a.save_dir = a.save_dir or tempfile.mkdtemp(prefix="xp_check_")
     os.makedirs(a.save_dir, exist_ok=True)
+    print(f"kayıt klasörü: {a.save_dir}")
 
     try:
         client = XPlaneConnect()
