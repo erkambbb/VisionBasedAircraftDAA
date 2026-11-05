@@ -51,6 +51,11 @@ def running(args):
     return subprocess.run(["pgrep"] + args, capture_output=True).returncode == 0
 
 
+def xplane_open():
+    out = subprocess.run(["wmctrl", "-l"], capture_output=True, text=True).stdout
+    return any("X-System" in l or " X-Plane" in l for l in out.splitlines())
+
+
 def report(root, gen_alive, xp_alive):
     """(report lines, list of problems)."""
     prog_path = os.path.join(root, "progress.json")
@@ -94,7 +99,7 @@ def main():
     if not os.path.isdir(root):
         print(f"DURUM: SORUN ({root} yok)")
         return 1
-    lines, problems = report(root, running(["-f", f"generate_fleet --name {name}"]), running(["-x", "X-Plane-x86_64"]))
+    lines, problems = report(root, running(["-f", f"generate_fleet --name {name}"]), xplane_open())
     print("\n".join(lines))
     print("DURUM: " + (f"SORUN ({'; '.join(problems)})" if problems else "tamam"))
     return 1 if problems else 0
