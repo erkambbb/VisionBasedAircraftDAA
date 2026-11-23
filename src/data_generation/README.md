@@ -91,9 +91,11 @@ the AI aircraft with the `UavSwitch` X-Plane plugin (`src/xplane_plugin/uav_swit
 (convex hull of the OBJ vertices projected with the live camera matrices), and converts to the camera look with
 `rpi-cam-style` at the end. Steps and checks: `docs/FLEET_GECE.md`.
 
-## 166 UAV fleet dataset (uav_fleet_v3)
-`./run_fleet_night.sh uav_fleet_v3` archives old datasets into `datasets/arsiv/` (`archive_datasets.sh`), then renders 120 frames per
-model (100 train + 20 valid) and 1000 for `uav_166_tactical_talon` (833 + 167): 20 800 frames. It resumes from `progress.json`.
+## 166 UAV fleet dataset (uav_fleet_v4)
+`./run_fleet_night.sh uav_fleet_v4` archives old datasets into `datasets/arsiv/` (`archive_datasets.sh`), then renders 22 000 frames
+over 17 cities worldwide (`fleet_core.CITIES`, blocks of ~30 frames per city): 90 single-UAV frames per model (1150 for `uav_166_tactical_talon`), plus 2000 frames with 2 UAVs and
+2000 with 3-4 UAVs (groups of 20 frames, one label line per UAV) and 2000 background frames without UAVs. Airports to avoid come from X-Plane's apt.dat (`make_city_airports.py`). Needs 4 AI aircraft in the flight setup. It resumes from `progress.json`.
+Distance bands, weather presets, altitude, time and city spots are constants in [fleet_core.py](./fleet_core.py).
 * **[generate_fleet.py](./generate_fleet.py):** Frame loop. The box is the pixel difference inside the UAV silhouette. Runs a self check every 15 minutes (`<dataset>/kontrol/son_kontrol.jpg`)
 * **[overlay_clean.py](./overlay_clean.py):** Finds and removes X-Plane's `<Anchor deployed>` tag
 * **[check_run.py](./check_run.py):** Run status for the 15 minute check

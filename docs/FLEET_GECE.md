@@ -1,23 +1,44 @@
-# 166 UAV veri seti çalışması (uav_fleet_v3)
+# 166 UAV veri seti çalışması (uav_fleet_v4)
 
 ## Ne üretir
-- `plane_models/` içindeki 166 modelin her biri için 120 kare (`uav_166_tactical_talon` için 1000). Toplam 20 800 kare.
-- Her modelde 100 train + 20 valid (talon: 833 + 167).
-- Hava çoğunlukla açık (%70 açık, %20 ince bulut, %10 az bulutlu). Ownship 170–1000 ft zeminden yüksekte.
-- UAV'ın kameraya en yakın yüzeyi 0.1–300 m arasında. Karelerin %10'u 0.1–5 m, kalanı 5–300 m (log dağılım).
-  Çok küçük modellerde 300 m'de uçak 8 pikselden küçük kalırsa üst sınır otomatik düşer (`--min-px 8`).
-- Konum: Palo Alto, ownship ±2.5 km (düz zemin). Saat 08:00–17:00 yerel.
+- Toplam 22 000 kare. 16 000 tek UAV: 165 model x 90 kare, `uav_166_tactical_talon` 1150 kare.
+- 2000 kare 2 UAV'lı (100 grup x 20), 2000 kare 3-4 UAV'lı (100 grup x 20). Grupların yarısında talon var.
+  Her UAV kendi mesafesini ayrı seçer (biri 100 m, öbürü 20 m gibi). Resimde üst üste binen UAV'lar atılır.
+- 2000 kare uçaksız arka plan (100 grup x 20, `bg_*`, boş etiket dosyası). Model arka planı öğrensin diye.
+- Her model, grup ve arka plan grubu aynı karışımı alır (`fleet_core.unit_plan`): hava payları, mesafe bantları,
+  şehir türü, aşağı bakış, saat ve irtifa her birimde tüm aralığa eşit dağılır. Hiçbir model tek havada kalmaz.
+  Hava her birimde bloklar halinde (20 karelik grupta 8 açık, 2 ince bulut, 1'er bulutlu/yağmur/fırtına/sis, 6 karışık).
+- Her model ve grupta yaklaşık 5/6 train, 1/6 valid.
+- Mesafe (kameraya en yakın yüzey): %10 0.25–25 m (log), %50 25–180 m, %40 180–300 m.
+  Küçük modelde 300 m'de uçak 8 pikselden küçük kalırsa üst sınır düşer (`--min-px 8`).
+- Hava (20 karede bir): %40 açık, %10 ince bulut, %5 bulutlu, %5 yağmur, %5 fırtına, %5 sis, %30 karışık
+  (rastgele katmanlar, pus, hafif yağmur). Bulut tabanı her zaman ownship'in üstünde.
+- Ownship zeminden 150–1000 ft yüksekte. Karelerin %45'inde kamera aşağı bakar (-8 ile -35 derece), UAV şehrin önünde görünür.
+- Konum: dünyada 17 şehir (`fleet_core.CITIES`, `fleet_core.SPOTS`, toplam 163 nokta): New York, Chicago, Washington DC,
+  Toronto, Miami, Las Vegas, Los Angeles, Seattle, London, Paris, Frankfurt, Barcelona, Innsbruck, İstanbul, Dubai,
+  Tokyo, Sydney. Her şehirde gökdelen/yüksek blok, orta katlı ve alçak ev noktaları (%45/%25/%30).
+  Bina arkasında kalan UAV'lı kare kutu tutmadığı için atılır.
+- Her modelin 90 karesi 30'luk 3 bloğa bölünür, her blok başka şehirde. Grup ve arka plan setleri (20 kare) tek şehir.
+  Şehirler sırayla dağıtılır (her şehre ~1290 kare); çalışma şehir şehir gider, her şehre bir kez geçilir
+  (`fleet_core.plan_units`). Şehre geçişte sahnenin yüklenmesi beklenir (en çok 240 sn + 15 sn).
+- Havalimanları X-Plane'in `apt.dat` dosyasından gelir (`make_city_airports.py` -> `city_airports.py`):
+  pisti 1500 m ve üstü olanlara 4 km, küçüklere 1,5 km'den yakın uçulmaz; yerde uçak görünmesin.
+  X-Plane'de park halindeki uçaklar zaten kapalı (`renopt_static_acf 0`).
+- Saat her şehrin kendi yerel saati (yaz saati dahil); Sydney'de yaz Aralık–Mart.
+- Zemin yüksekliği UavSwitch eklentisinin arazi yoklamasından gelir (şehir başına bir kez, `terrain_<şehir>.npz`).
+- Ham kareler JPEG kalite 100. Kamera görünümü (`_cam`) gerçek kamera taklidi olarak JPEG 70 kalır.
+- Saat 08:00–18:00 yerel (yaz saati), tarih hep yaz (21 Haziran – 22 Eylül).
 
 ## Çıktılar (`datasets/`)
 | Klasör | İçerik |
 |---|---|
-| `uav_fleet_v3/` | Ham X-Plane kareleri (1280x720) + YOLO etiketleri + `state_data.csv` |
-| `uav_fleet_v3_cam/` | Kamera görünümlü hali (rpi-cam-style) + etiketler. Eğitimde bu kullanılır. |
-| `uav_fleet_v3_cam_boxes/` | Kutuları kırmızı, 1 piksel çizilmiş kontrol görüntüleri |
+| `uav_fleet_v4/` | Ham X-Plane kareleri (1280x720) + YOLO etiketleri + `state_data.csv` |
+| `uav_fleet_v4_cam/` | Kamera görünümlü hali (rpi-cam-style) + etiketler. Eğitimde bu kullanılır. |
+| `uav_fleet_v4_cam_boxes/` | Kutuları kırmızı, 1 piksel çizilmiş kontrol görüntüleri |
 
-| `arsiv/` | Eski veri setleri (`uav_fleet_v1*`, `uav_fleet_v2*`, `xp12mm_*`, `sample_mini`, `sample_small`, `pt`) |
+| `arsiv/` | Eski veri setleri (`uav_fleet_v1*`, `uav_fleet_v2*`, `uav_fleet_v3*`, `xp12mm_*`, `sample_mini`, `sample_small`, `pt`) |
 
-Log: `datasets/uav_fleet_v3/fleet_run.log`. İlerleme: `progress.json`.
+Log: `datasets/uav_fleet_v4/fleet_run.log`. İlerleme: `progress.json`.
 
 Klasör renkleri `archive_datasets.sh` ile verilir: `arsiv` turuncu, içinde v1 kum, v2 camgöbeği, xp12mm lacivert, diğerleri gri;
 yeni set mavi, `_cam` açık mavi, `_cam_boxes` kırmızı. `sample_small` arşive taşındığı için `src/model/train.py` ve `eval.py`
@@ -42,26 +63,27 @@ varsayılan veri seti yerine `-d` ile veri seti verilerek çalıştırılmalı.
 `X-Plane 11/Aircraft/Extra Aircraft/uav_fleet/` altına yazar.
 
 ## Gece öncesi (bir kez)
-1. X-Plane'i aç, Cessna 172SP ile uçuşa başla. Flight Configuration'da **1 AI uçak** seçili olsun (hangisi olduğu önemli değil, script değiştirir).
+1. X-Plane'i aç, herhangi bir yerde Cessna 172SP ile uçuşa başla (script şehirlere kendisi gider). Flight Configuration'da **4 AI uçak** seçili olsun (hangileri olduğu önemli değil, script değiştirir).
+   UavSwitch eklentisi yeni (slot destekli) sürüme güncellendi: X-Plane'i yeniden başlat.
 2. X-Plane tam ekran monitör 1'de, önünde başka pencere yok. Terminali başka çalışma alanına al.
 3. Ekran kilidini ve uykuyu kapat (script `systemd-inhibit` ve `xset` ile de dener).
 4. Prize tak. Laptop ise havalandırma açık dursun.
 5. Deneme: `cd src/data_generation && python3 -m generate_fleet --smoke` (3 model x 4 kare, ~1 dk).
-   Sonra `python3 draw_boxes.py uav_smoke` ve `datasets/uav_smoke_boxes/` içine bak: kutu uçağı sarıyor mu?
+   Deneme 2 çoklu grubu da içerir (2 ve 3 UAV x 4 kare). Sonra `python3 draw_boxes.py uav_smoke` ve `datasets/uav_smoke_boxes/` içine bak: kutu uçağı sarıyor mu?
 
 ## Başlatma
-X-Plane açık ve uçağın içinde olmalı (Palo Alto, mtab penceresi kapalı).
+X-Plane açık ve uçağın içinde olmalı (mtab penceresi kapalı).
 ```bash
 cd src/data_generation
-./run_fleet_night.sh uav_fleet_v3
+./run_fleet_night.sh uav_fleet_v4
 ```
 Komut önce eski veri setlerini `datasets/arsiv/` altına taşır, sonra üretimi başlatır. Bitince kamera görünümü (rpi-cam-style) ve
 kırmızı 1 piksel kutular otomatik üretilir, kamera kadrajı dışında kalan kareler silinir. Yarıda kesilirse aynı komut kaldığı modelden devam eder.
 
 ## 15 dakikalık kontrol
-- Üretim kendi kendini 15 dakikada bir denetler: son 12 kareyi okur, `datasets/uav_fleet_v3/kontrol/son_kontrol.jpg` dosyasını yazar.
+- Üretim kendi kendini 15 dakikada bir denetler: son 12 kareyi okur, `datasets/uav_fleet_v4/kontrol/son_kontrol.jpg` dosyasını yazar.
   3 ya da daha çok karede yazı kalmışsa, görüntü düz renkse ya da kutu çerçeve dışındaysa durur. Tek şüpheli kare yalnız loga yazılır.
-- Dışarıdan durum: `python3 check_run.py uav_fleet_v3`. Son satır `DURUM: tamam` ya da `DURUM: SORUN (...)` olur.
+- Dışarıdan durum: `python3 check_run.py uav_fleet_v4`. Son satır `DURUM: tamam` ya da `DURUM: SORUN (...)` olur.
   Süreç, X-Plane, kare sayıları, KONTROL satırları ve 5 dakikadır yeni kare gelmemesi denetlenir.
 
 ## Hız
