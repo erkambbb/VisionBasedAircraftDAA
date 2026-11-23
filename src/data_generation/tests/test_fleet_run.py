@@ -33,7 +33,11 @@ class FakeClient:
 
 
 class FakeSwitcher:
-    def load(self, acf, timeout=30): return acf
+    def __init__(self): self.calls = []
+
+    def load(self, acf, slot=1, timeout=30):
+        self.calls.append((acf, slot))
+        return acf
 
 
 def test_run_model_writes_dataset(tmp_path, monkeypatch):
@@ -56,7 +60,7 @@ def test_run_model_writes_dataset(tmp_path, monkeypatch):
     monkeypatch.setattr(gtd, "capture_frame", fake_capture)
     geo = (960.0, 540.0, 120.0, 40.0)
     poly = np.array([[900, 520], [1020, 520], [1020, 560], [900, 560]], np.float32)
-    monkeypatch.setattr(gf, "live_geom", lambda client, sw, sh, hull: (geo, poly, 0.03))
+    monkeypatch.setattr(gf, "live_geoms", lambda client, sw, sh, hulls: ([(geo, poly)], 0.03, 80.0))
     monkeypatch.setattr(gf, "xplane_active", lambda: True)   # real one sees no X-Plane; wait_front would spin
     gtd.args = types.SimpleNamespace(location="Palo Alto", own_p_max=30.0, own_r_max=45.0, monitor=1, region=None, out_size=(1280, 720))
     lat, lon, _ = c.REGION_OPTIONS["Palo Alto"]
@@ -72,7 +76,8 @@ def test_run_model_writes_dataset(tmp_path, monkeypatch):
     ctx = types.SimpleNamespace(args=args, client=FakeClient(), log=lambda m: None, rng=np.random.default_rng(1),
                                 switcher=FakeSwitcher(), root=str(root), csv_path=str(csv), screen=None,
                                 sw=1920, sh=1080, hfov_meas=34.0, total_saved=0,
-                                labels_removed=0, last_check=0.0, recent=[], period=0.05, settle=6, good=0, crop=None)
+                                labels_removed=0, last_check=0.0, recent=[], period=0.05, settle=6, good=0, crop=None,
+                                spots=None, loaded={}, terrain=None, airports=[])
     gf.run_model(ctx, 1, "uav_001_x", info)
 
     assert len(os.listdir(root / "images/train")) == 10 and len(os.listdir(root / "images/valid")) == 2
@@ -89,6 +94,7 @@ def test_run_model_writes_dataset(tmp_path, monkeypatch):
     img = cv2.imread(str(root / "images/train/u001_000.jpg"))
     assert not gf.overlay_clean.label_left(img)
     assert any(k == "sim/weather/cloud_type[0]" for k, _ in ctx.client.sent)
+    assert any(k == "sim/weather/visibility_reported_m" for k, _ in ctx.client.sent)
     gf.selfcheck(ctx)                              # must pass on clean frames
     assert (root / "kontrol" / "son_kontrol.jpg").exists()
     hits = iter([True] + [False] * 11)                # one doubtful frame only warns
@@ -189,3 +195,105 @@ def test_shards_cover_every_frame_and_unlabelled_are_dropped(tmp_path):
                for s in shards for f in os.listdir(os.path.join(s, "images/train")))
     assert gf.drop_unlabelled(str(src)) == 1
     assert not (src / "images/train/u0.jpg").exists() and not (src / "labels/train/u0.txt").exists()
+
+
+def test_multi_uav_frame_gets_one_box_per_uav(tmp_path, monkeypatch):
+    monkeypatch.setattr(gf, "LOAD_WAIT_S", 0)
+    monkeypatch.setattr(gf.time, "sleep", lambda s: None)
+    monkeypatch.setattr(gf, "xplane_active", lambda: True)
+    bg = np.random.default_rng(0).integers(150, 160, (1080, 1920, 3), dtype=np.uint8)
+    calls = {"n": 0}
+
+    def fake_capture(s, cl):
+        calls["n"] += 1
+        f = bg.copy()
+        if calls["n"] % 2 == 1:
+            f[520:560, 900:1020] = 30             # UAV 1, 100 m
+            f[200:220, 300:340] = 40              # UAV 2, far away
+        return f
+
+    monkeypatch.setattr(gtd, "capture_frame", fake_capture)
+    rect = lambda x0, y0, x1, y1: np.array([[x0, y0], [x1, y0], [x1, y1], [x0, y1]], np.float32)
+    geoms = [((960.0, 540.0, 120.0, 40.0), rect(900, 520, 1020, 560)),
+             ((320.0, 210.0, 40.0, 20.0), rect(300, 200, 340, 220))]
+    monkeypatch.setattr(gf, "live_geoms", lambda client, sw, sh, hulls: (geoms[:len(hulls)], 0.03, 80.0))
+    gtd.args = types.SimpleNamespace(location="Palo Alto", own_p_max=30.0, own_r_max=45.0, monitor=1, region=None, out_size=(1280, 720))
+    lat, lon, _ = c.REGION_OPTIONS["Palo Alto"]
+    monkeypatch.setitem(c.REGION_OPTIONS, "Palo Alto", [lat, lon, 0.0])
+    args = gf.parse_args(["--name", "t"])
+    root = tmp_path / "t"
+    for sub in ("images/train", "images/valid", "labels/train", "labels/valid"):
+        (root / sub).mkdir(parents=True)
+    csv = root / "state_data.csv"; csv.write_text(gf.CSV_HEADER)
+    hull = np.array([[x, y, z] for x in (-1, 1) for y in (-.2, .5) for z in (-1, 1.4)])
+    infos = [fc.ModelInfo(f"uav_00{i}_x", f"Aircraft/x{i}.acf", hull, radius=1.7, extent=2.4) for i in (1, 2)]
+    sw_ = FakeSwitcher()
+    ctx = types.SimpleNamespace(args=args, client=FakeClient(), log=lambda m: None, rng=np.random.default_rng(1),
+                                switcher=sw_, root=str(root), csv_path=str(csv), screen=None,
+                                sw=1920, sh=1080, hfov_meas=34.0, total_saved=0,
+                                labels_removed=0, last_check=0.0, recent=[], period=0.05, settle=6, good=0, crop=None,
+                                spots=None, loaded={}, terrain=None, airports=[])
+    gf.run_unit(ctx, "m2_000", "m2_000", infos, 6)
+    assert sw_.calls == [("Aircraft/x1.acf", 1), ("Aircraft/x2.acf", 2)]
+    labs = (root / "labels/train/m2_000_000.txt").read_text().strip().splitlines()
+    assert len(labs) == 2
+    boxes = sorted(tuple(float(v) for v in l.split()[1:]) for l in labs)
+    assert abs(boxes[0][0] - 320 / 1920) < 0.003 and abs(boxes[1][0] - 960 / 1920) < 0.003
+    rows = csv.read_text().strip().splitlines()[1:]
+    assert len(rows) == 12 and all(r.split(",")[-13] == "2" for r in rows)
+    assert all(len(r.split(",")) == gf.CSV_HEADER.count(",") + 1 for r in rows)
+    assert len(os.listdir(root / "images/train")) == 5 and len(os.listdir(root / "images/valid")) == 1
+    gf.run_unit(ctx, "m2_000", "m2_000", infos, 2)  # models already in their slots: no reload
+    assert len(sw_.calls) == 2
+    geoms[1] = ((960.0, 540.0, 40.0, 20.0), rect(940, 530, 980, 550))   # second UAV on top of the first
+    with pytest.raises(RuntimeError):
+        gf.run_unit(ctx, "m2_001", "m2_001", infos, 2)
+
+
+def test_background_frames_have_empty_labels_and_full_rows(tmp_path, monkeypatch):
+    monkeypatch.setattr(gf.time, "sleep", lambda s: None)
+    bg = np.random.default_rng(0).integers(60, 200, (1080, 1920, 3), dtype=np.uint8)   # busy city, not flat
+    monkeypatch.setattr(gtd, "capture_frame", lambda s, cl: bg.copy())
+    monkeypatch.setattr(gf, "live_geoms", lambda client, sw, sh, hulls: ([], 0.03, 80.0))
+    gtd.args = types.SimpleNamespace(location="Palo Alto", own_p_max=30.0, own_r_max=45.0, monitor=1, region=None, out_size=(1280, 720))
+    lat, lon, _ = c.REGION_OPTIONS["Palo Alto"]
+    monkeypatch.setitem(c.REGION_OPTIONS, "Palo Alto", [lat, lon, 0.0])
+    args = gf.parse_args(["--name", "t"])
+    root = tmp_path / "t"
+    for sub in ("images/train", "images/valid", "labels/train", "labels/valid"):
+        (root / sub).mkdir(parents=True)
+    csv = root / "state_data.csv"; csv.write_text(gf.CSV_HEADER)
+    ctx = types.SimpleNamespace(args=args, client=FakeClient(), log=lambda m: None, rng=np.random.default_rng(1),
+                                switcher=FakeSwitcher(), root=str(root), csv_path=str(csv), screen=None,
+                                sw=1920, sh=1080, hfov_meas=34.0, total_saved=0,
+                                labels_removed=0, last_check=0.0, recent=[], period=0.05, settle=6, good=0, crop=None,
+                                spots=fc.spot_offsets("New York"), loaded={}, terrain=None,
+                                airports=fc.airport_offsets("New York"))
+    gf.run_background(ctx, "bg_000", 20)
+    assert len(os.listdir(root / "images/train")) == 17 and len(os.listdir(root / "images/valid")) == 3
+    assert (root / "labels/train/bg_000_000.txt").read_text() == ""
+    rows = csv.read_text().strip().splitlines()
+    assert len(rows) == 21 and all(r.count(",") == rows[0].count(",") for r in rows)
+    clouds = [r.split(",")[4] for r in rows[1:]]
+    assert clouds.count("acik") == 8 and len(set(clouds)) == 7        # every weather in every unit
+    gf.selfcheck(ctx)
+    assert gf.drop_unlabelled(str(root)) == 0                           # background frames are kept
+
+
+def test_enter_city_switches_origin_time_and_terrain(tmp_path, monkeypatch):
+    class ProbeSwitcher(FakeSwitcher):
+        def probe(self, latlons, timeout=60):
+            return np.full(len(latlons), 42.0)
+    monkeypatch.setattr(gf.time, "sleep", lambda s: None)
+    gtd.args = types.SimpleNamespace(location="New York", own_p_max=30.0, own_r_max=45.0, monitor=1, region=None, out_size=(1280, 720))
+    args = gf.parse_args(["--name", "t"])
+    ctx = types.SimpleNamespace(args=args, client=FakeClient(), log=lambda m: None, switcher=ProbeSwitcher(),
+                                root=str(tmp_path), spots=None, airports=[], terrain=None, city=None)
+    gf.enter_city(ctx, "Tokyo")
+    assert ctx.city == "Tokyo" and gtd.args.location == "Tokyo"
+    assert c.REGION_OPTIONS["Tokyo"] == [fc.CITIES["Tokyo"][0], fc.CITIES["Tokyo"][1], 0.0]
+    assert (tmp_path / "terrain_tokyo.npz").exists()
+    assert abs(ctx.terrain.ground(0.0, 0.0) - 42.0) < 1e-6
+    assert gf.city_zulu(ctx, 12 * 3600) == 3 * 3600 and gf.city_day(ctx, 200) == 200
+    gf.enter_city(ctx, "Sydney")
+    assert gf.city_day(ctx, 200) == 17                                  # southern summer (January)

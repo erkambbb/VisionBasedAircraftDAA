@@ -10,7 +10,8 @@ REGION_OPTIONS = {
     "Palo Alto": [37.46358871459961, -122.11750030517578, 3048.0],
     "Boston": [42.37415695190430, -71.01775360107422, 3048.0],
     "Osh Kosh": [43.98562240600586, -88.55644226074219, 3048.0],
-    "Reno Tahoe": [39.51367568969727, -119.76921844482422, 3048.0]
+    "Reno Tahoe": [39.51367568969727, -119.76921844482422, 3048.0],
+    "New York": [40.7400, -74.0150, 0.0],     # Hudson between Manhattan and Jersey City (fleet run)
 }
 
 # shifted 500m north and 500m east
@@ -26,7 +27,8 @@ TIME_OPTIONS = {
     "Palo Alto": 8,
     "Boston": 5,
     "Osh Kosh": 5,
-    "Reno Tahoe": 8
+    "Reno Tahoe": 8,
+    "New York": 5
 }
 
 DAW_OPTIONS = {

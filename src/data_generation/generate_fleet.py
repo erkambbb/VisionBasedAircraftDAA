@@ -1,14 +1,19 @@
 """Multi-UAV dataset run for the 12 mm IMX477 camera.
 
-Every model in plane_models/ gets 120 frames (uav_166_tactical_talon: 1000).
-Frames: clear weather (mostly), ownship 170-1000 ft above ground, UAV 0.1 m - 300 m away.
+Single-UAV frames: every model in plane_models/ gets 90 (uav_166_tactical_talon: 1150), 16 000 in all.
+Multi-UAV frames: 100 groups x 20 with 2 UAVs, 100 groups x 20 with 3-4 UAVs (4000 frames).
+Background frames: 100 groups x 20 without any UAV (2000 frames, empty label files). 22 000 in all.
+Every unit gets the same mix of weather, distance, place, time and altitude (fleet_core.unit_plan).
+Frames: 17 cities worldwide (fleet_core.CITIES), blocks of about 30 frames per city, summer, 08-18 local, mixed weather (fleet_core.WEATHER_*),
+ownship 150-1000 ft above ground, UAV surface 0.25-300 m away (fleet_core.DIST_BANDS).
 
 Run from src/data_generation:
-    python3 -m generate_fleet --smoke                 # 3 models x 4 frames, quick test
-    python3 -m generate_fleet --name uav_fleet_v3     # full run
-    python3 -m generate_fleet --name uav_fleet_v3 --resume
+    python3 -m generate_fleet --smoke                 # 3 models x 4 + 2 groups + 1 background group x 4
+    python3 -m generate_fleet --name uav_fleet_v4     # full run
+    python3 -m generate_fleet --name uav_fleet_v4 --resume
 
-Needs: X-Plane running in a flight (ownship Cessna 172SP, 1 AI aircraft in the flight setup),
+Needs: X-Plane running in a flight anywhere (the run flies to each city; ownship Cessna 172SP, 4 AI aircraft
+in the flight setup),
 XPlaneConnect and UavSwitch plugins installed, X-Plane window in front on monitor 1.
 """
 import sys
@@ -16,6 +21,7 @@ sys.path.append('..')
 
 import argparse
 import json
+import re
 import os
 import shutil
 import subprocess
@@ -41,12 +47,21 @@ from data_generation.projection import (fov_from_projection, body_points_ogl,
 XP_DIR = os.path.expanduser("~/.local/share/Steam/steamapps/common/X-Plane 11")
 CSV_HEADER = ("filename,model,split,loc,clouds,local_time_sec,alt_msl_m,e0,n0,u0,h0,p0,r0,"
               "vang,hang,d_surface,d_center,e1,n1,u1,h1,p1,r1,raw_w,raw_h,"
-              "bb_cx,bb_cy,bb_w,bb_h,out_w_px,out_h_px,geo_dx,geo_dy,hfov_meas\n")
+              "bb_cx,bb_cy,bb_w,bb_h,out_w_px,out_h_px,geo_dx,geo_dy,hfov_meas,n_uav,slot,spot,day_of_year,agl_meas_m,"
+              "local_hhmm,ground_m,agl_ft,visibility_m,rain,thunderstorm,cloud_types,cloud_bases_m\n")
 LOAD_WAIT_S = 3.0
-CLOUD_BLOCK = 20          # frames per weather state (cloud changes need time to settle)
-WEATHER_WAIT_S = 1.0
+SCENERY_WAIT_S = 240.0    # longest wait for the scenery after a jump to another city
+SCENERY_SETTLE_S = 15.0   # then a little more for buildings and textures
+JPEG_MAX = [cv2.IMWRITE_JPEG_QUALITY, 100]
+WEATHER_WAIT_S = 2.0      # rain and visibility need a little longer than clouds
+BAD_WEATHER_STREAK = 25   # this many unstable frames in a row: the weather state flickers, pick another
 NET_RETRY_S = 3.0
-MIN_CLEAR_M = 25.0        # intruder must stay this high above sea level (ground safety)
+MIN_CLEAR_M = 25.0        # intruder must stay this high above the ground (ground safety)
+
+
+def park(slot):
+    """Far away from the camera (sub-pixel): used for the empty frame and for unused AI slots."""
+    return Aircraft(slot, 400.0 * slot, 20000.0, 2000.0 + 50.0 * slot, 0, pitch=0, roll=0)
 
 
 class Log:
@@ -178,8 +193,9 @@ class Switcher:
         os.makedirs(self.dir, exist_ok=True)
         self.n = int(time.time())
 
-    def load(self, acf_path, timeout=30.0):
-        """Returns the path X-Plane reports as loaded; raises RuntimeError on failure."""
+    def load(self, acf_path, slot=1, timeout=30.0):
+        """Loads acf_path into AI slot `slot`. Returns the path X-Plane reports as loaded;
+        raises RuntimeError on failure."""
         if not os.path.isabs(acf_path):
             acf_path = os.path.join(self.xp_dir, acf_path)      # plugin gets the full path
         self.n += 1
@@ -189,7 +205,7 @@ class Switcher:
             os.remove(ack)
         tmp = os.path.join(self.dir, "request.tmp")
         with open(tmp, "w") as f:
-            f.write(f"{rid}\t{acf_path}\n")
+            f.write(f"{rid}\t{acf_path}\t{slot}\n")
         os.replace(tmp, os.path.join(self.dir, "request.txt"))
         t0 = time.time()
         while time.time() - t0 < timeout:
@@ -205,29 +221,107 @@ class Switcher:
             time.sleep(0.2)
         raise RuntimeError("UavSwitch cevap vermedi: eklenti yüklü mü? (X-Plane Log.txt'te UavSwitch ara)")
 
+    def probe(self, latlons, timeout=120.0):
+        """Terrain height (m MSL, nan = not loaded) at each (lat, lon), from the plugin's probe."""
+        self.n += 1
+        rid = f"p{self.n}"
+        ack = os.path.join(self.dir, "probe_ack.txt")
+        if os.path.exists(ack):
+            os.remove(ack)
+        tmp = os.path.join(self.dir, "probe_request.tmp")
+        with open(tmp, "w") as f:
+            f.write(rid + "\n" + "".join(f"{la:.7f} {lo:.7f}\n" for la, lo in latlons))
+        os.replace(tmp, os.path.join(self.dir, "probe_request.txt"))
+        t0 = time.time()
+        while time.time() - t0 < timeout:
+            if os.path.exists(ack):
+                lines = open(ack).read().split()
+                if lines and lines[0] == rid:
+                    return np.array([float(v) for v in lines[1:]])
+            time.sleep(0.2)
+        raise RuntimeError("UavSwitch arazi yoklaması cevap vermedi (eklenti eski olabilir: X-Plane'i yeniden başlat)")
+
+
+def wait_scenery(ctx, city):
+    """After a jump to another city: waits until X-Plane has loaded the scenery under every spot
+    (terrain probes hit), then a little longer for buildings and textures."""
+    pts = [(la, lo) for _, la, lo, *_ in fc.SPOTS[city]]
+    t0, hit = time.time(), 0.0
+    while time.time() - t0 < SCENERY_WAIT_S:
+        time.sleep(5.0)
+        hit = float(np.mean(~np.isnan(ctx.switcher.probe(pts))))
+        if hit >= 0.999:
+            break
+    ctx.log(f"  {city}: sahne {time.time() - t0:.0f} sn'de yüklendi (noktaların %{hit * 100:.0f}'i)")
+    time.sleep(SCENERY_SETTLE_S)
+
+
+def enter_city(ctx, city):
+    """Moves the run to `city`: region origin, spots, airports, terrain grid (cached per city)."""
+    if getattr(ctx, "city", None) == city:
+        return
+    lat0, lon0 = fc.CITIES[city][:2]
+    c.REGION_OPTIONS[city] = [lat0, lon0, 0.0]
+    gtd.args.location = city
+    ctx.city, ctx.spots, ctx.airports = city, fc.spot_offsets(city), fc.airport_offsets(city)
+    ctx.log(f"şehir: {city} ({len(ctx.spots)} nokta, {len(ctx.airports)} havalimanından uzak)")
+    s = ctx.spots[0]
+    gtd.set_position(ctx.client, Aircraft(0, s[1], s[2], s[3] + 300.0, 0, pitch=0, roll=0))
+    for slot in range(1, ctx.args.ai_slots + 1):
+        gtd.set_position(ctx.client, park(slot))
+    wait_scenery(ctx, city)
+    slug = re.sub(r"[^a-z0-9]+", "_", city.lower())
+    ctx.terrain = build_terrain(ctx, os.path.join(ctx.root, f"terrain_{slug}.npz"))
+
+
+def build_terrain(ctx, path):
+    """Terrain grid over the city's spots, probed once and cached in the dataset folder (resume)."""
+    import pymap3d as pm
+    if not ctx.spots:
+        return None
+    if os.path.exists(path):
+        z = np.load(path)
+        return fc.Terrain(float(z["e0"]), float(z["n0"]), float(z["step"]), z["msl"])
+    es, ns = fc.Terrain.grid(ctx.spots)
+    ee, nn = np.meshgrid(es, ns)
+    lat0, lon0 = fc.region_origin(city_of(ctx))
+    lat, lon, _ = pm.enu2geodetic(ee.ravel(), nn.ravel(), 0.0, lat0, lon0, 0.0)
+    msl = ctx.switcher.probe(list(zip(lat, lon))).reshape(ee.shape)
+    hit = float(np.mean(~np.isnan(msl)))
+    ctx.log(f"arazi: {msl.size} nokta yoklandı, %{hit * 100:.0f} bulundu, "
+            f"yükseklik {np.nanmin(msl) if hit else 0:.0f}-{np.nanmax(msl) if hit else 0:.0f} m")
+    if hit < 0.5:
+        ctx.log("  UYARI: arazinin yarısından azı yüklü; eksik yerlerde bölge tahmini zemin kullanılacak")
+    np.savez(path, e0=es[0], n0=ns[0], step=es[1] - es[0], msl=msl)
+    return fc.Terrain(es[0], ns[0], es[1] - es[0], msl)
+
 
 # ---------------------------------------------------------------- frame geometry
-GEOM_REFS = ([f"sim/multiplayer/position/plane1_{a}" for a in ("x", "y", "z", "psi", "the", "phi")]
-             + ["sim/graphics/view/world_matrix", "sim/graphics/view/projection_matrix_3d",
-                "sim/operation/misc/frame_rate_period"])
+VIEW_REFS = ["sim/graphics/view/world_matrix", "sim/graphics/view/projection_matrix_3d",
+             "sim/operation/misc/frame_rate_period", "sim/flightmodel/position/y_agl"]
 
 
-def live_geom(client, sw, sh, hull):
-    """(geometric box (cx, cy, w, h) or None, convex polygon of the UAV hull in px, seconds per
-    rendered frame). One request: every XPlaneConnect round trip costs a rendered frame."""
-    v = client.getDREFs(GEOM_REFS)
-    x, y, z, psi, the, phi = (r[0] for r in v[:6])
-    pts = body_points_ogl(hull, (x, y, z), psi, the, phi)
-    px, front = project_points(pts, v[6], v[7], sw, sh)
-    box = bbox_loose(px, front, sw, sh, min_visible=0.01)
-    poly = None
-    if box is not None:
-        poly = cv2.convexHull(px.astype(np.float32)).reshape(-1, 2)
-    return box, poly, v[8][0]
+def geom_refs(k):
+    return [f"sim/multiplayer/position/plane{s}_{a}" for s in range(1, k + 1)
+            for a in ("x", "y", "z", "psi", "the", "phi")] + VIEW_REFS
 
 
-def live_bbox(client, sw, sh, hull):
-    return live_geom(client, sw, sh, hull)[0]
+def live_geoms(client, sw, sh, hulls):
+    """([(geometric box (cx, cy, w, h) or None, convex polygon of the hull in px)] for AI slots
+    1..len(hulls), seconds per rendered frame, ownship height above ground (m)).
+    One request: every XPlaneConnect round trip costs a rendered frame."""
+    v = client.getDREFs(geom_refs(len(hulls)))
+    wm, pm, period = v[-4], v[-3], v[-2][0]
+    agl = v[-1][0] if len(v[-1]) else float("nan")
+    out = []
+    for s, hull in enumerate(hulls):
+        x, y, z, psi, the, phi = (r[0] for r in v[6 * s:6 * s + 6])
+        pts = body_points_ogl(hull, (x, y, z), psi, the, phi)
+        px, front = project_points(pts, wm, pm, sw, sh)
+        box = bbox_loose(px, front, sw, sh, min_visible=0.01)
+        poly = cv2.convexHull(px.astype(np.float32)).reshape(-1, 2) if box is not None else None
+        out.append((box, poly))
+    return out, period, agl
 
 
 def settle(ctx):
@@ -351,21 +445,46 @@ def diff_bbox(a, b, roi, sw, sh, mask=None):
     return ((xs0 + xs1) / 2.0, (ys0 + ys1) / 2.0, float(xs1 - xs0), float(ys1 - ys0))
 
 
-def sample_state(rng, info, args):
-    """Ownship + intruder placement, or None if the sample is unusable."""
-    alt = fc.sample_altitude_m(rng)
-    own = Aircraft(0, rng.uniform(-args.enrange, args.enrange), rng.uniform(-args.enrange, args.enrange),
-                   alt, rng.uniform(0, 360), float(np.clip(rng.normal(0, 5), -30, 30)),
+PLACE_TRIES = 30
+
+
+def ground_at(terrain, e, n, fallback):
+    return terrain.ground(e, n, fallback) if terrain is not None else fallback - (e * e + n * n) / (2 * fc.EARTH_R)
+
+
+def sample_state(rng, infos, args, spots=None, plan=None, terrain=None, airports=()):
+    """Ownship + one intruder per model in `infos` (AI slots 1..k), or None if unusable.
+    `plan` (one entry of fleet_core.unit_plan) fixes altitude, city category, camera look and the
+    distance band of the first UAV; the others get a random band, so one can be 20 m away and
+    another 150 m. Several UAVs never overlap in the picture: their boxes must stay separate.
+    Heights are above the real terrain (probe grid) when `terrain` is given."""
+    plan = plan or {}
+    alt = plan.get("alt") or fc.sample_altitude_m(rng)
+    spot, e, n, g_est = fc.sample_spot(rng, spots, args.enrange, plan.get("category"), airports)
+    ground = ground_at(terrain, e, n, g_est)
+    own = Aircraft(0, e, n, ground + alt, rng.uniform(0, 360), fc.sample_pitch(rng, plan.get("down")),
                    float(np.clip(rng.normal(0, 10), -45, 45)))
-    d_surf, d_cen = fc.sample_distance(rng, info.radius, info.extent, args.min_px)
-    vang = rng.uniform(-args.vfov / 2, args.vfov / 2)
-    hang = rng.uniform(-args.hfov / 2, args.hfov / 2)
-    if rng.random() < fc.EDGE_FRACTION:
-        hang, vang = fc.edge_angles(rng, hang, vang, args.hfov, args.vfov, args.xp_hfov, d_cen, info.radius)
-    intr = gtd.get_intruder_position(own, d_cen, hang, vang, rng.uniform(0, 360))
-    if intr.u < MIN_CLEAR_M:
-        return None
-    return dict(own=own, intr=intr, vang=vang, hang=hang, d_surf=d_surf, d_cen=d_cen, alt=alt)
+    uavs, placed = [], []
+    for slot, info in enumerate(infos, 1):
+        for _ in range(PLACE_TRIES):
+            band = plan.get("band") if slot == 1 else None
+            d_surf, d_cen = fc.sample_distance(rng, info.radius, info.extent, args.min_px, band)
+            vang = rng.uniform(-args.vfov / 2, args.vfov / 2)
+            hang = rng.uniform(-args.hfov / 2, args.hfov / 2)
+            if rng.random() < fc.EDGE_FRACTION:
+                hang, vang = fc.edge_angles(rng, hang, vang, args.hfov, args.vfov, args.xp_hfov, d_cen, info.radius)
+            ang_r = fc.angular_radius_deg(info.radius, d_cen)
+            if fc.apart(placed, hang, vang, ang_r):
+                break
+        else:
+            return None
+        placed.append((hang, vang, ang_r))
+        intr = gtd.get_intruder_position(own, d_cen, hang, vang, rng.uniform(0, 360))
+        intr.id = slot
+        if intr.u - ground_at(terrain, intr.e, intr.n, g_est) < MIN_CLEAR_M:
+            return None
+        uavs.append(dict(intr=intr, vang=vang, hang=hang, d_surf=d_surf, d_cen=d_cen))
+    return dict(own=own, uavs=uavs, alt=alt, spot=spot, ground=ground)
 
 
 # ---------------------------------------------------------------- dataset files
@@ -385,11 +504,11 @@ def prepare_dataset(args):
     return root, csv_path, prog_path, prog
 
 
-def remove_model_files(root, idx):
+def remove_model_files(root, prefix):
     for sub in ("images/train", "images/valid", "labels/train", "labels/valid"):
         d = os.path.join(root, sub)
         for fn in os.listdir(d):
-            if fn.startswith(f"u{idx:03d}_"):
+            if fn.startswith(prefix + "_"):
                 os.remove(os.path.join(d, fn))
 
 
@@ -399,7 +518,7 @@ def selfcheck(ctx):
     (X-Plane tag), labels sit inside the frame, and drop a montage into <dataset>/kontrol/."""
     ctx.last_check = time.time()
     tiles, problems, tags = [], [], []
-    for split, fn, bbox in ctx.recent:
+    for split, fn in ctx.recent:
         img = cv2.imread(os.path.join(ctx.root, "images", split, fn + ".jpg"))
         if img is None:
             problems.append(f"{fn}: görüntü okunamadı")
@@ -409,12 +528,12 @@ def selfcheck(ctx):
             tags.append(fn)
         if float(img.std()) < 4.0:
             problems.append(f"{fn}: görüntü düz renk (ekran yanlış olabilir)")
-        lab = open(os.path.join(ctx.root, "labels", split, fn + ".txt")).read().split()
-        cx, cy, bw, bh = (float(v) for v in lab[1:5])
-        x0, y0, x1, y1 = (cx - bw / 2) * w, (cy - bh / 2) * h, (cx + bw / 2) * w, (cy + bh / 2) * h
-        if x0 < -1 or y0 < -1 or x1 > w + 1 or y1 > h + 1 or bw <= 0 or bh <= 0:
-            problems.append(f"{fn}: kutu çerçeve dışında")
-        cv2.rectangle(img, (int(round(x0)), int(round(y0))), (int(round(x1)), int(round(y1))), (0, 0, 255), 1)
+        for line in open(os.path.join(ctx.root, "labels", split, fn + ".txt")).read().splitlines():
+            cx, cy, bw, bh = (float(v) for v in line.split()[1:5])
+            x0, y0, x1, y1 = (cx - bw / 2) * w, (cy - bh / 2) * h, (cx + bw / 2) * w, (cy + bh / 2) * h
+            if x0 < -1 or y0 < -1 or x1 > w + 1 or y1 > h + 1 or bw <= 0 or bh <= 0:
+                problems.append(f"{fn}: kutu çerçeve dışında")
+            cv2.rectangle(img, (int(round(x0)), int(round(y0))), (int(round(x1)), int(round(y1))), (0, 0, 255), 1)
         tiles.append(cv2.resize(img, (640, 360)))
     if tiles:
         tiles = tiles[-6:]
@@ -435,54 +554,126 @@ def selfcheck(ctx):
     ctx.log(msg + ", sorun yok")
 
 
-# ---------------------------------------------------------------- one model
-def run_model(ctx, idx, name, info):
+# ---------------------------------------------------------------- one unit
+def wcols(local_time, st, wp):
+    """Readable per-frame columns: clock, ground, height above ground, weather details."""
+    hh, mm = divmod(int(local_time) // 60, 60)
+    types_ = "/".join(str(int(wp[f"cloud_type[{i}]"])) for i in range(3))
+    bases = "/".join(f"{wp[f'cloud_base_msl_m[{i}]']:.0f}" if wp[f"cloud_type[{i}]"] else "-" for i in range(3))
+    return (f"{hh:02d}:{mm:02d},{st['ground']:.1f},{st['alt'] / fc.FT:.0f},{wp['visibility_reported_m']:.0f},"
+            f"{wp['rain_percent']:.2f},{wp['thunderstorm_percent']:.2f},{types_},{bases}")
+
+
+def apply_conditions(ctx, pl, weather, wparams, bad_streak):
+    """Weather and clock of plan entry `pl`. Weather is only sent when the preset changes (plans
+    keep each preset in one block) or when it kept the scene unstable: then new values, same preset."""
+    client = ctx.client
+    if pl["weather"] != weather or bad_streak >= BAD_WEATHER_STREAK:
+        if bad_streak >= BAD_WEATHER_STREAK:
+            ctx.log(f"  {weather}: {bad_streak} kare üst üste kararsız, aynı hava yeni değerlerle")
+        weather, wparams = pl["weather"], fc.weather_params(ctx.rng, pl["weather"])
+        set_weather(client, wparams)
+        bad_streak = 0
+        time.sleep(WEATHER_WAIT_S)
+    client.sendDREF("sim/time/zulu_time_sec", city_zulu(ctx, pl["local_time"]))
+    client.sendDREF("sim/time/local_date_days", city_day(ctx, pl["day"]))
+    return weather, wparams, bad_streak
+
+
+def city_of(ctx):
+    return getattr(ctx, "city", None) or ctx.args.location
+
+
+def city_zulu(ctx, local_sec):
+    city = city_of(ctx)
+    if city in fc.CITIES:
+        return fc.zulu_sec(local_sec, city)
+    return (local_sec + (c.TIME_OPTIONS[city] - 1) * 3600) % 86400     # old regions: US summer time
+
+
+def city_day(ctx, day):
+    city = city_of(ctx)
+    return fc.city_day(city, day) if city in fc.CITIES else int(day)
+
+
+def set_weather(client, params):
+    for k, v in params.items():
+        client.sendDREF("sim/weather/" + k, v)
+
+
+def load_unit(ctx, infos):
+    """Loads the unit's models into AI slots 1..k (skips slots that already hold the model) and
+    parks the unused slots far away, so no unlabelled aircraft can show up in a frame."""
+    loaded = []
+    for slot, info in enumerate(infos, 1):
+        if ctx.loaded.get(slot) != info.acf_path:
+            ctx.loaded.pop(slot, None)
+            loaded.append(ctx.switcher.load(info.acf_path, slot))
+            ctx.loaded[slot] = info.acf_path
+    for slot in range(len(infos) + 1, ctx.args.ai_slots + 1):
+        gtd.set_position(ctx.client, park(slot))
+    return loaded
+
+
+def run_unit(ctx, key, prefix, infos, n):
+    """Frames for one unit: a single model (infos = [info]) or a multi-UAV group (2-4 models).
+    Every UAV of a saved frame has its own checked box; one bad box rejects the whole frame."""
     args, client, log, rng = ctx.args, ctx.client, ctx.log, ctx.rng
-    n = args.frames if args.frames else fc.frames_for(name)
+    k = len(infos)
     n_train, n_valid = fc.split_counts(n)
-    remove_model_files(ctx.root, idx)
+    remove_model_files(ctx.root, prefix)
 
-    loaded = ctx.switcher.load(info.acf_path)
-    log(f"[{idx:03d}] {name}: yüklendi ({loaded}), {n} kare ({n_train} train + {n_valid} valid), "
-        f"yarıçap {info.radius:.2f} m, en büyük boyut {info.extent:.2f} m")
-    time.sleep(LOAD_WAIT_S)
+    loaded = load_unit(ctx, infos)
+    log(f"[{key}] {', '.join(i.name for i in infos)}: yüklendi ({len(loaded)} yeni), {n} kare "
+        f"({n_train} train + {n_valid} valid), yarıçap {', '.join(f'{i.radius:.2f}' for i in infos)} m")
+    if loaded:
+        time.sleep(LOAD_WAIT_S)
 
-    rows, offs, saved, tries, rejects = [], [], 0, 0, {"ground": 0, "bbox": 0, "small": 0, "net": 0, "label": 0, "mismatch": 0, "unstable": 0}
-    weather, since_weather = None, CLOUD_BLOCK
+    hulls = [i.hull for i in infos]
+    rows, offs, saved, tries = [], [], 0, 0
+    rejects = {"ground": 0, "bbox": 0, "small": 0, "net": 0, "label": 0, "mismatch": 0, "unstable": 0, "overlap": 0}
+    weather, wparams, bad_streak = None, None, 0
     net_fail = 0
+    max_tries = n * (10 if k == 1 else 30)
+    plan = fc.unit_plan(rng, n, args.daystart, args.dayend)
     while saved < n:
         tries += 1
-        if tries > n * 10:
-            raise RuntimeError(f"{name}: {tries} denemede {saved}/{n} kare, çok fazla ret {rejects}")
-        st = sample_state(rng, info, args)
+        if tries > max_tries:
+            raise RuntimeError(f"{key}: {tries} denemede {saved}/{n} kare, çok fazla ret {rejects}")
+        pl = plan[saved]
+        st = sample_state(rng, infos, args, ctx.spots, pl, ctx.terrain, ctx.airports)
         if st is None:
             rejects["ground"] += 1
             continue
         try:
-            if since_weather >= CLOUD_BLOCK:
-                weather = fc.pick_weather(rng)
-                client.sendDREF("sim/weather/cloud_type[0]", weather)
-                since_weather = 0
-                time.sleep(WEATHER_WAIT_S)
-            local_time = rng.uniform(args.daystart * 3600, args.dayend * 3600)
-            client.sendDREF("sim/time/zulu_time_sec", local_time + c.TIME_OPTIONS[args.location] * 3600)
-            client.sendDREF("sim/time/local_date_days", 0)
+            weather, wparams, bad_streak = apply_conditions(ctx, pl, weather, wparams, bad_streak)
+            local_time, day = pl["local_time"], city_day(ctx, pl["day"])
             gtd.set_position(client, st["own"])
-            gtd.set_position(client, st["intr"])
+            for u in st["uavs"]:
+                gtd.set_position(client, u["intr"])
             settle(ctx)
-            bbox, poly, ctx.period = live_geom(client, ctx.sw, ctx.sh, info.hull)
-            if bbox is None:
+            geoms, ctx.period, agl = live_geoms(client, ctx.sw, ctx.sh, hulls)
+            if any(g[0] is None for g in geoms):
                 rejects["bbox"] += 1
                 continue
-            ow, oh = fc.bbox_out_px(bbox, ctx.sw, ctx.hfov_meas)
-            if max(ow, oh) < args.min_px:
+            if any(max(fc.bbox_out_px(g[0], ctx.sw, ctx.hfov_meas)) < args.min_px for g in geoms):
                 rejects["small"] += 1
+                continue
+            masks = [poly_mask(poly, ctx.sw, ctx.sh, geo) for geo, poly in geoms]
+            union = masks[0].copy()
+            overlap = False
+            for m in masks[1:]:
+                overlap = overlap or bool(np.any(union & m))
+                union |= m
+            if overlap:
+                rejects["overlap"] += 1               # two UAVs touch in the picture: no clean boxes
                 continue
             if not getattr(ctx, 'win_id', None):
                 wait_front(log)
             frame = grab_frame(ctx)
-            # same camera, UAV moved far away -> pixel difference is the UAV
-            gtd.set_position(client, Aircraft(1, 0, 6000, 400, 0, pitch=0, roll=0))
+            # same camera, UAVs moved far away -> pixel difference is the UAVs
+            for slot in range(1, k + 1):
+                gtd.set_position(client, park(slot))
             settle(ctx)
             empty = grab_frame(ctx)
             if not getattr(ctx, 'win_id', None) and not xplane_active():
@@ -499,59 +690,71 @@ def run_model(ctx, idx, name, info):
             time.sleep(NET_RETRY_S)
             continue
 
-        geo = bbox
-        mask = poly_mask(poly, ctx.sw, ctx.sh, geo)
-        frame, label = overlay_clean.remove_label(frame, empty, mask)
-        if label == "overlap":
-            rejects["label"] += 1                     # the tag sits on the UAV: cannot be erased cleanly
-            continue
-        if label == "removed":
+        label = "none"
+        for _ in range(k):                            # one X-Plane tag per UAV at most
+            frame, status = overlay_clean.remove_label(frame, empty, union)
+            if status == "overlap":
+                label = "overlap"
+                break
+            if status == "none":
+                break
             ctx.labels_removed += 1
-        if overlay_clean.label_left(frame):
-            rejects["label"] += 1
+        if label == "overlap" or overlay_clean.label_left(frame):
+            rejects["label"] += 1                     # the tag sits on a UAV: cannot be erased cleanly
             continue
-        if outside_share(frame, empty, mask) > MAX_OUTSIDE:
+        if outside_share(frame, empty, union) > MAX_OUTSIDE:
             rejects["unstable"] += 1                  # scene still changing between the two frames
+            bad_streak += 1
             adapt(ctx, False)
             continue
-        bbox = diff_bbox(frame, empty, geo, ctx.sw, ctx.sh, mask)
-        if bbox is None:
-            rejects["nodiff"] = rejects.get("nodiff", 0) + 1
-            adapt(ctx, False)
-            if saved == 0 and rejects["nodiff"] >= 12:
-                raise RuntimeError(f"{name}: UAV ekranda görünmüyor (model yüklenmemiş olabilir)")
+        bad_streak = 0
+
+        boxes, why = [], None
+        for (geo, _), mask in zip(geoms, masks):
+            bbox = diff_bbox(frame, empty, geo, ctx.sw, ctx.sh, mask)
+            if bbox is None:
+                why = "nodiff"
+                break
+            if not edges_agree(bbox, geometric_clipped(geo, ctx.sw, ctx.sh), ctx.sw, ctx.sh):
+                why = "mismatch"                      # pixels and geometry disagree (or a building hides it)
+                break
+            if max(fc.bbox_out_px(bbox, ctx.sw, ctx.hfov_meas)) < args.min_px:
+                why = "small"
+                break
+            off = (bbox[0] - geo[0], bbox[1] - geo[1])
+            vis = visible_box(frame, empty, bbox, geo, mask, ctx.crop, ctx.sw, ctx.sh)
+            if vis is None or min(fc.bbox_out_px(vis, ctx.sw, ctx.hfov_meas)) < MIN_VISIBLE_PX:
+                why = "outside"                       # a UAV that is not in the camera picture
+                break
+            boxes.append((vis, off))
+        if why:
+            rejects[why] = rejects.get(why, 0) + 1
+            if why == "nodiff":
+                adapt(ctx, False)
+                if saved == 0 and rejects["nodiff"] >= 30:
+                    raise RuntimeError(f"{key}: UAV ekranda görünmüyor (model yüklenmemiş olabilir)")
+            if why == "mismatch" and saved == 0 and rejects["mismatch"] >= 60 * k:
+                raise RuntimeError(f"{key}: piksel kutusu geometriyle hiç uyuşmuyor")
             continue
-        if not edges_agree(bbox, geometric_clipped(geo, ctx.sw, ctx.sh), ctx.sw, ctx.sh):
-            rejects["mismatch"] += 1                  # pixels and geometry disagree: do not trust the box
-            if saved == 0 and rejects["mismatch"] >= 60:
-                raise RuntimeError(f"{name}: piksel kutusu geometriyle hiç uyuşmuyor")
-            continue
-        ow, oh = fc.bbox_out_px(bbox, ctx.sw, ctx.hfov_meas)
-        if max(ow, oh) < args.min_px:
-            rejects["small"] += 1
-            continue
-        geo_dx, geo_dy = bbox[0] - geo[0], bbox[1] - geo[1]
-        offs.append((geo_dx, geo_dy))
-        bbox = visible_box(frame, empty, bbox, geo, mask, ctx.crop, ctx.sw, ctx.sh)
-        if bbox is None or min(fc.bbox_out_px(bbox, ctx.sw, ctx.hfov_meas)) < MIN_VISIBLE_PX:
-            rejects["outside"] = rejects.get("outside", 0) + 1     # no UAV in the camera picture
-            continue
-        ow, oh = fc.bbox_out_px(bbox, ctx.sw, ctx.hfov_meas)
 
         split = "train" if saved < n_train else "valid"
-        fn = f"u{idx:03d}_{saved:03d}"
-        cv2.imwrite(os.path.join(ctx.root, "images", split, fn + ".jpg"), gtd.resize_frame(frame, args.out_size))
+        fn = f"{prefix}_{saved:03d}"
+        cv2.imwrite(os.path.join(ctx.root, "images", split, fn + ".jpg"), gtd.resize_frame(frame, args.out_size), JPEG_MAX)
         with open(os.path.join(ctx.root, "labels", split, fn + ".txt"), "w") as f:
-            f.write(yolo_line(*bbox, ctx.sw, ctx.sh))
-        o, i = st["own"], st["intr"]
-        rows.append(f"{fn}.jpg,{name},{split},{args.location},{weather},{local_time:.1f},{st['alt']:.1f},"
-                    f"{o.e:.2f},{o.n:.2f},{o.u:.2f},{o.h:.2f},{o.p:.2f},{o.r:.2f},{st['vang']:.3f},{st['hang']:.3f},"
-                    f"{st['d_surf']:.3f},{st['d_cen']:.3f},{i.e:.2f},{i.n:.2f},{i.u:.2f},{i.h:.2f},{i.p:.2f},{i.r:.2f},"
-                    f"{ctx.sw},{ctx.sh},{bbox[0]:.1f},{bbox[1]:.1f},{bbox[2]:.1f},{bbox[3]:.1f},{ow:.1f},{oh:.1f},{geo_dx:.1f},{geo_dy:.1f},"
-                    f"{ctx.hfov_meas}\n")
-        ctx.recent = (ctx.recent + [(split, fn, bbox)])[-12:]
+            f.writelines(yolo_line(*b, ctx.sw, ctx.sh) for b, _ in boxes)
+        o = st["own"]
+        for slot, (info, u, (bbox, off)) in enumerate(zip(infos, st["uavs"], boxes), 1):
+            i = u["intr"]
+            ow, oh = fc.bbox_out_px(bbox, ctx.sw, ctx.hfov_meas)
+            offs.append(off)
+            rows.append(f"{fn}.jpg,{info.name},{split},{city_of(ctx)},{weather},{local_time:.1f},{o.u:.1f},"
+                        f"{o.e:.2f},{o.n:.2f},{o.u:.2f},{o.h:.2f},{o.p:.2f},{o.r:.2f},{u['vang']:.3f},{u['hang']:.3f},"
+                        f"{u['d_surf']:.3f},{u['d_cen']:.3f},{i.e:.2f},{i.n:.2f},{i.u:.2f},{i.h:.2f},{i.p:.2f},{i.r:.2f},"
+                        f"{ctx.sw},{ctx.sh},{bbox[0]:.1f},{bbox[1]:.1f},{bbox[2]:.1f},{bbox[3]:.1f},{ow:.1f},{oh:.1f},"
+                        f"{off[0]:.1f},{off[1]:.1f},{ctx.hfov_meas},{k},{slot},{st['spot']},{day},{agl:.1f},"
+                        f"{wcols(local_time, st, wparams)}\n")
+        ctx.recent = (ctx.recent + [(split, fn)])[-12:]
         saved += 1
-        since_weather += 1
         ctx.total_saved += 1
         adapt(ctx, True)
 
@@ -561,8 +764,89 @@ def run_model(ctx, idx, name, info):
     with open(ctx.csv_path, "a") as f:
         f.writelines(rows)
     mo = np.mean(np.abs(np.array(offs)), axis=0) if offs else (0, 0)
-    log(f"[{idx:03d}] {name}: {saved} kare tamam, denemeler {tries}, retler {rejects}, "
+    log(f"[{key}] {saved} kare tamam, denemeler {tries}, retler {rejects}, "
         f"geometri-piksel kayma ort. dx={mo[0]:.1f} dy={mo[1]:.1f} px")
+
+
+def run_background(ctx, key, n):
+    """Frames without any UAV (empty label file): the detector learns the background. Same plan,
+    weather, places and camera as the UAV frames. Two captures must agree, so nothing moving
+    (birds, a half-loaded scene) is saved, and no X-Plane tag may be on screen."""
+    args, client, log, rng = ctx.args, ctx.client, ctx.log, ctx.rng
+    n_train, n_valid = fc.split_counts(n)
+    remove_model_files(ctx.root, key)
+    for slot in range(1, args.ai_slots + 1):
+        gtd.set_position(client, park(slot))
+    log(f"[{key}] arka plan: {n} kare ({n_train} train + {n_valid} valid)")
+    plan = fc.unit_plan(rng, n, args.daystart, args.dayend)
+    rows, saved, tries, net_fail = [], 0, 0, 0
+    rejects = {"ground": 0, "net": 0, "label": 0, "unstable": 0}
+    weather, wparams, bad_streak = None, None, 0
+    no_uav = np.zeros((ctx.sh, ctx.sw), np.uint8)
+    while saved < n:
+        tries += 1
+        if tries > n * 10:
+            raise RuntimeError(f"{key}: {tries} denemede {saved}/{n} kare, çok fazla ret {rejects}")
+        pl = plan[saved]
+        st = sample_state(rng, [], args, ctx.spots, pl, ctx.terrain, ctx.airports)
+        if st is None:
+            rejects["ground"] += 1
+            continue
+        try:
+            weather, wparams, bad_streak = apply_conditions(ctx, pl, weather, wparams, bad_streak)
+            gtd.set_position(client, st["own"])
+            settle(ctx)
+            _, ctx.period, agl = live_geoms(client, ctx.sw, ctx.sh, [])
+            a = grab_frame(ctx)
+            settle(ctx)
+            b = grab_frame(ctx)
+            net_fail = 0
+        except (OSError, TimeoutError, ValueError) as e:
+            rejects["net"] += 1
+            net_fail += 1
+            client = ctx.client = reset_client(ctx.client)
+            log(f"  X-Plane cevap vermedi ({e}); yeniden deneniyor ({net_fail}/200)")
+            if net_fail >= 200:
+                raise SystemExit("X-Plane 10 dakikadır cevap vermiyor, duruyorum (ilerleme kaydedildi, --resume ile devam edilir)")
+            time.sleep(NET_RETRY_S)
+            continue
+        if overlay_clean.label_left(a):
+            rejects["label"] += 1
+            continue
+        if outside_share(a, b, no_uav) > MAX_OUTSIDE:
+            rejects["unstable"] += 1
+            bad_streak += 1
+            adapt(ctx, False)
+            continue
+        bad_streak = 0
+        split = "train" if saved < n_train else "valid"
+        fn = f"{key}_{saved:03d}"
+        cv2.imwrite(os.path.join(ctx.root, "images", split, fn + ".jpg"), gtd.resize_frame(a, args.out_size), JPEG_MAX)
+        open(os.path.join(ctx.root, "labels", split, fn + ".txt"), "w").close()
+        o = st["own"]
+        vals = dict(filename=f"{fn}.jpg", model="none", split=split, loc=city_of(ctx), clouds=weather,
+                    local_time_sec=f"{pl['local_time']:.1f}", alt_msl_m=f"{o.u:.1f}", e0=f"{o.e:.2f}", n0=f"{o.n:.2f}",
+                    u0=f"{o.u:.2f}", h0=f"{o.h:.2f}", p0=f"{o.p:.2f}", r0=f"{o.r:.2f}", raw_w=ctx.sw, raw_h=ctx.sh,
+                    hfov_meas=ctx.hfov_meas, n_uav=0, slot=0, spot=st["spot"], day_of_year=city_day(ctx, pl["day"]),
+                    agl_meas_m=f"{agl:.1f}")
+        head = CSV_HEADER.strip().split(",")
+        tail = wcols(pl["local_time"], st, wparams).split(",")
+        rows.append(",".join(str(vals.get(h, "")) for h in head[:-len(tail)]) + "," + ",".join(tail) + "\n")
+        ctx.recent = (ctx.recent + [(split, fn)])[-12:]
+        saved += 1
+        ctx.total_saved += 1
+        adapt(ctx, True)
+        if time.time() - ctx.last_check >= CHECK_EVERY_S:
+            selfcheck(ctx)
+    with open(ctx.csv_path, "a") as f:
+        f.writelines(rows)
+    log(f"[{key}] {saved} kare tamam, denemeler {tries}, retler {rejects}")
+
+
+def run_model(ctx, idx, name, info):
+    """Single-UAV frames of one model."""
+    n = ctx.args.frames if ctx.args.frames else fc.frames_for(name)
+    run_unit(ctx, f"{idx:03d}", f"u{idx:03d}", [info], n)
 
 
 # ---------------------------------------------------------------- post processing
@@ -586,6 +870,8 @@ def drop_unlabelled(root):
     n = 0
     for split in ("train", "valid"):
         for fn in os.listdir(os.path.join(root, "images", split)):
+            if fn.startswith("bg_"):
+                continue                              # background frames have no UAV on purpose
             lab = os.path.join(root, "labels", split, os.path.splitext(fn)[0] + ".txt")
             if not os.path.exists(lab) or not open(lab).read().strip():
                 os.remove(os.path.join(root, "images", split, fn))
@@ -637,11 +923,18 @@ def post_process(args, log):
 # ---------------------------------------------------------------- main
 def parse_args(argv=None):
     ap = argparse.ArgumentParser()
-    ap.add_argument("--name", default="uav_fleet_v3")
+    ap.add_argument("--name", default="uav_fleet_v4")
     ap.add_argument("--models-dir", default=os.path.expanduser("~/Belgeler/ARIKOVANI/plane_models"))
     ap.add_argument("--xp-dir", default=XP_DIR)
-    ap.add_argument("--location", default="Palo Alto")
-    ap.add_argument("--enrange", type=float, default=2500.0, help="ownship east/north range (m); flat bay area")
+    ap.add_argument("--cities", default="all", help="all = every city in fleet_core.CITIES, or a comma "
+                    "list (e.g. 'London,Tokyo'); none = flat area around --location")
+    ap.add_argument("--location", default="New York", help="region for --cities none (flat area +-enrange)")
+    ap.add_argument("--enrange", type=float, default=2500.0, help="ownship east/north range (m) without city spots")
+    ap.add_argument("--ai-slots", type=int, default=fc.MAX_UAV, help="AI aircraft in the X-Plane flight setup")
+    ap.add_argument("--group-frames", type=int, default=fc.GROUP_FRAMES, help="frames per multi-UAV group")
+    ap.add_argument("--no-multi", action="store_true", help="single-UAV frames only")
+    ap.add_argument("--only-multi", action="store_true", help="multi-UAV groups only")
+    ap.add_argument("--bg-units", type=int, default=fc.BG_UNITS, help="background-only groups (no UAV), group-frames each")
     ap.add_argument("--focal-mm", type=float, default=12.0)
     ap.add_argument("--xp-hfov", type=float, default=c.XP_RENDER_HFOV)
     ap.add_argument("--out-size", default="1280x720")
@@ -649,11 +942,11 @@ def parse_args(argv=None):
     ap.add_argument("--region", default=None)
     ap.add_argument("--workspace", type=int, default=1, help="move X-Plane to this workspace (0-based) so you never see it; -1 = leave")
     ap.add_argument("--daystart", type=float, default=8.0)
-    ap.add_argument("--dayend", type=float, default=17.0)
+    ap.add_argument("--dayend", type=float, default=18.0)
     ap.add_argument("--min-px", type=float, default=8.0, help="smallest UAV size (output pixels, longest side)")
     ap.add_argument("--frames", type=int, default=0, help="override frames per model (testing)")
     ap.add_argument("--only", default=None, help="comma list of model numbers, e.g. 1,2,166")
-    ap.add_argument("--smoke", action="store_true", help="3 models x 4 frames into dataset 'uav_smoke'")
+    ap.add_argument("--smoke", action="store_true", help="3 models x 4 frames + 2 groups x 4 into dataset 'uav_smoke'")
     ap.add_argument("--resume", action="store_true")
     ap.add_argument("--no-post", action="store_true")
     ap.add_argument("--cam-workers", type=int, default=6, help="parallel camstyle processes")
@@ -662,7 +955,7 @@ def parse_args(argv=None):
     ap.add_argument("--seed", type=int, default=7)
     a = ap.parse_args(argv)
     if a.smoke:
-        a.name, a.frames, a.only, a.no_post = "uav_smoke", 4, a.only or "1,60,166", True
+        a.name, a.frames, a.only, a.no_post, a.group_frames = "uav_smoke", 4, a.only or "1,60,166", True, 4
     a.out_size = gtd.parse_size(a.out_size)
     a.region = gtd.parse_region(a.region)
     a.hfov, a.vfov = camera_fov(a.focal_mm)
@@ -675,7 +968,8 @@ def main():
     log = Log(os.path.join(root, "fleet_run.log"))
     log(f"başlangıç: {vars(args)}")
 
-    c.REGION_OPTIONS[args.location][2] = 0.0         # positions below are meters above sea level
+    if args.location in c.REGION_OPTIONS:
+        c.REGION_OPTIONS[args.location][2] = 0.0     # positions below are meters above sea level
     gtd.args = types.SimpleNamespace(location=args.location, own_p_max=30.0, own_r_max=45.0,
                                      monitor=args.monitor, region=args.region, out_size=args.out_size)
 
@@ -683,8 +977,27 @@ def main():
     if args.only:
         wanted = {int(v) for v in args.only.split(",")}
         names = [n for n in names if int(n.split("_")[1]) in wanted]
-    total = sum(args.frames or fc.frames_for(n) for n in names)
-    log(f"{len(names)} model, toplam {total} kare; tahmini süre {total * 1.0 / 3600:.1f} sa")
+    singles = [] if args.only_multi else names
+    if args.cities == "none":
+        cities = []
+    elif args.cities == "all":
+        cities = list(fc.CITIES)
+    else:
+        cities = [v.strip() for v in args.cities.split(",")]
+        bad = [v for v in cities if v not in fc.CITIES]
+        if bad:
+            raise SystemExit(f"bilinmeyen şehir: {bad}; seçenekler: {', '.join(fc.CITIES)}")
+    bgs = [f"bg_{i:03d}" for i in range(args.bg_units)]
+    if args.smoke:
+        bgs = bgs[:1]
+    groups = [] if args.no_multi else fc.group_plan(names, args.seed)
+    if args.smoke:
+        groups = [next(g for g in groups if g[0].startswith("m2")), next(g for g in groups if g[0].startswith("m3"))]
+    if groups and max(len(m) for _, m in groups) > args.ai_slots:
+        raise SystemExit(f"gruplar {max(len(m) for _, m in groups)} UAV istiyor, --ai-slots {args.ai_slots}")
+    total = sum(args.frames or fc.frames_for(n) for n in singles) + (len(groups) + len(bgs)) * args.group_frames
+    log(f"{len(singles)} model + {len(groups)} çoklu grup + {len(bgs)} arka plan grubu, toplam {total} kare; "
+        f"tahmini süre {total * 1.2 / 3600:.1f} sa")
 
     client = XPlaneConnect()
     client.socket.settimeout(10)
@@ -698,8 +1011,7 @@ def main():
     meas, _ = fov_from_projection(client.getDREF("sim/graphics/view/projection_matrix_3d"))
     if abs(meas - args.xp_hfov) > 0.1:
         raise SystemExit(f"FOV tutmadı: hedef {args.xp_hfov}, ölçülen {meas:.3f}")
-    for k, v in (("cloud_type[1]", 0), ("cloud_type[2]", 0), ("cloud_base_msl_m[0]", 4572), ("cloud_tops_msl_m[0]", 5182)):
-        client.sendDREF("sim/weather/" + k, v)
+    client.sendDREF("sim/weather/use_real_weather_bool", 0)
     client.pauseSim(True)
     client.sendDREF("sim/operation/override/override_joystick", 1)
     subprocess.run(["xset", "s", "off", "-dpms", "s", "noblank"], check=False)
@@ -721,24 +1033,37 @@ def main():
                                 switcher=Switcher(args.xp_dir), root=root, csv_path=csv_path, screen=screen,
                                 sw=sw, sh=sh, hfov_meas=round(meas, 3), total_saved=0, win_id=win_id,
                                 labels_removed=0, last_check=time.time(), recent=[],
-                                period=0.05, settle=6, good=0, crop=crop_mask(args, sw, sh))
+                                period=0.05, settle=6, good=0, crop=crop_mask(args, sw, sh),
+                                spots=None, loaded={}, terrain=None, airports=[], city=None)
     log(f"ekran {sw}x{sh}, render FOV {meas:.2f} derece")
 
-    for name in names:
-        idx = int(name.split("_")[1])
-        if name in prog["done"]:
+    infos = {}
+
+    def info_of(name):
+        if name not in infos:
+            infos[name] = fc.load_model(args.models_dir, name)
+        return infos[name]
+
+    units = fc.plan_units(singles, groups, bgs, args.frames, args.group_frames, args.seed, cities)
+    for key, prefix, models, n, city in units:
+        if key in prog["done"]:
             continue
-        info = fc.load_model(args.models_dir, name)
+        if cities:
+            enter_city(ctx, city)
         for attempt in (1, 2):
             try:
-                run_model(ctx, idx, name, info)
-                prog["done"].append(name)
+                if models:
+                    run_unit(ctx, key, prefix, [info_of(m) for m in models], n)
+                else:
+                    run_background(ctx, key, n)
+                prog["done"].append(key)
                 break
             except RuntimeError as e:
-                log(f"[{idx:03d}] {name}: HATA (deneme {attempt}): {e}")
-                remove_model_files(root, idx)
+                log(f"[{key}] HATA (deneme {attempt}): {e}")
+                remove_model_files(root, prefix)
+                ctx.loaded.clear()                    # reload the models on the next try
                 if attempt == 2:
-                    prog["failed"].append(name)
+                    prog["failed"].append(key)
         json.dump(prog, open(prog_path, "w"), indent=1)
 
     log(f"model tamam: {len(prog['done'])}, başarısız: {prog['failed']}")
