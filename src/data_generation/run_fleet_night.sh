@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# 166-UAV dataset run. Usage: ./run_fleet_night.sh [NAME]   (default uav_fleet_v3)
+# 166-UAV dataset run. Usage: ./run_fleet_night.sh [NAME]   (default uav_fleet_v4)
 # Archives old datasets, then starts fresh, or resumes automatically if datasets/NAME exists.
 # Keeps the screen awake while it runs. Log: datasets/NAME/fleet_run.log
 cd "$(dirname "$0")" || exit 1
-NAME=${1:-uav_fleet_v3}
+NAME=${1:-uav_fleet_v4}
 ./archive_datasets.sh "$NAME" || exit 1
 EXTRA=()
 [ -d "../../datasets/$NAME" ] && EXTRA+=(--resume)

@@ -1,6 +1,6 @@
 """Status of a fleet run, for the 15 minute check. Reads file names only, never images.
 
-    python3 check_run.py [NAME]        # default uav_fleet_v3
+    python3 check_run.py [NAME]        # default uav_fleet_v4
 Prints a report; the last line is DURUM: tamam or DURUM: SORUN (...). Exit code 1 on SORUN.
 """
 import collections
@@ -94,7 +94,7 @@ def report(root, gen_alive, xp_alive):
 
 
 def main():
-    name = sys.argv[1] if len(sys.argv) > 1 else "uav_fleet_v3"
+    name = sys.argv[1] if len(sys.argv) > 1 else "uav_fleet_v4"
     root = os.path.join(DATASETS, name)
     if not os.path.isdir(root):
         print(f"DURUM: SORUN ({root} yok)")

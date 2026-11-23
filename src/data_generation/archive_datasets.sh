@@ -4,7 +4,7 @@
 # Safe to run again: nothing is overwritten. DATASETS_DIR selects another folder (used for testing).
 cd "$(dirname "$0")" || exit 1
 ROOT=$(realpath "${DATASETS_DIR:-../../datasets}") || exit 1
-NAME=${1:-uav_fleet_v3}
+NAME=${1:-uav_fleet_v4}
 ARSIV=$ROOT/arsiv
 mkdir -p "$ARSIV" || exit 1
 shopt -s nullglob
@@ -17,7 +17,7 @@ colour() {   # colour <Mint-Y colour> <dir>...
     done
 }
 
-for d in "$ROOT"/uav_fleet_v1* "$ROOT"/uav_fleet_v2* "$ROOT"/xp12mm_* "$ROOT"/sample_mini "$ROOT"/sample_small "$ROOT"/pt; do
+for d in "$ROOT"/uav_fleet_v1* "$ROOT"/uav_fleet_v2* "$ROOT"/uav_fleet_v3* "$ROOT"/xp12mm_* "$ROOT"/sample_mini "$ROOT"/sample_small "$ROOT"/pt; do
     [ -d "$d" ] || continue
     base=$(basename "$d")
     case "$base" in "$NAME"|"$NAME"_*) continue ;; esac
@@ -31,6 +31,7 @@ done
 colour Orange "$ARSIV"
 colour Sand "$ARSIV"/uav_fleet_v1*
 colour Teal "$ARSIV"/uav_fleet_v2*
+colour Purple "$ARSIV"/uav_fleet_v3*
 colour Navy "$ARSIV"/xp12mm_*
 colour Grey "$ARSIV"/sample_mini "$ARSIV"/sample_small "$ARSIV"/pt
 colour Blue "$ROOT/$NAME"
