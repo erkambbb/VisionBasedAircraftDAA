@@ -1,18 +1,28 @@
 # 166 UAV veri seti çalışması (uav_fleet_v4)
 
 ## Ne üretir
-- Toplam 22 000 kare. 16 000 tek UAV: 165 model x 90 kare, `uav_166_tactical_talon` 1150 kare.
+- Toplam 21 000 kare. 16 000 tek UAV: 165 model x 90 kare, `uav_166_tactical_talon` 1150 kare.
 - 2000 kare 2 UAV'lı (100 grup x 20), 2000 kare 3-4 UAV'lı (100 grup x 20). Grupların yarısında talon var.
   Her UAV kendi mesafesini ayrı seçer (biri 100 m, öbürü 20 m gibi). Resimde üst üste binen UAV'lar atılır.
-- 2000 kare uçaksız arka plan (100 grup x 20, `bg_*`, boş etiket dosyası). Model arka planı öğrensin diye.
+- 1000 kare uçaksız arka plan (50 grup x 20, `bg_*`, boş etiket dosyası). Model arka planı öğrensin diye.
+  Her arka plan karesi UAV'lı kare gibi kurulur: bir model seçilir (talon ağırlıklı, UAV karelerindeki payıyla),
+  UAV'ı aynı mesafe bandı, kenar ve zemin kontrolleriyle yerleştirilir, ama hiç gösterilmez (tüm AI slotları park).
+  Böylece irtifa, aşağı bakış ve eğim dağılımı UAV kareleriyle birebir aynı olur; hiçbir kamera durumu "UAV yok" demek olmaz.
+  Diğer arka planlar (gerçek arka plan, gökyüzü, COCO, Skyview) gerçek fotoğraftır, bu çalışma üretmez (`docs/EGITIM_HAZIRLIK.md`).
 - Her model, grup ve arka plan grubu aynı karışımı alır (`fleet_core.unit_plan`): hava payları, mesafe bantları,
   şehir türü, aşağı bakış, saat ve irtifa her birimde tüm aralığa eşit dağılır. Hiçbir model tek havada kalmaz.
   Hava her birimde bloklar halinde (20 karelik grupta 8 açık, 2 ince bulut, 1'er bulutlu/yağmur/fırtına/sis, 6 karışık).
-- Her model ve grupta yaklaşık 5/6 train, 1/6 valid.
-- Mesafe (kameraya en yakın yüzey): %10 0.25–25 m (log), %50 25–180 m, %40 180–300 m.
+- Train/valid ayrımı birim bazında (`fleet_core.valid_units`): bir birimin (modelin 30 karelik bloğu, grup, arka plan seti)
+  tüm kareleri aynı tarafa gider, çünkü bir bloğun kareleri aynı model, şehir ve hava bloklarını paylaşır.
+  Her türden (tek model, talon, 2 UAV, 3-4 UAV, arka plan) birimlerin 1/6'sı valid, şehirlere yayılır;
+  bir model en çok 1 bloğunu valid'e verir. Toplam ~3480 kare valid (%16.6). Seçim ilk başlatmada
+  `progress.json` içine (`valid`) yazılır, `--resume` aynısını kullanır.
+- Mesafe (kameraya en yakın yüzey): %10 0.50–25 m (log), %50 25–180 m, %40 180–300 m.
   Küçük modelde 300 m'de uçak 8 pikselden küçük kalırsa üst sınır düşer (`--min-px 8`).
 - Hava (20 karede bir): %40 açık, %10 ince bulut, %5 bulutlu, %5 yağmur, %5 fırtına, %5 sis, %30 karışık
   (rastgele katmanlar, pus, hafif yağmur). Bulut tabanı her zaman ownship'in üstünde.
+- Eğim: UAV pitch ve roll ±60°'ye kadar, ownship (kamerayı taşıyan uçak) roll ±45°, aşağı bakmayan karelerde pitch ±10°'ye kadar
+  (%50 düz, sonra çeyrekler %20/%15/%10/%5, işaret rastgele). Kamera ownship'e sabit, eğilince ufuk da döner.
 - Ownship zeminden 150–1000 ft yüksekte. Karelerin %45'inde kamera aşağı bakar (-8 ile -35 derece), UAV şehrin önünde görünür.
 - Konum: dünyada 17 şehir (`fleet_core.CITIES`, `fleet_core.SPOTS`, toplam 163 nokta): New York, Chicago, Washington DC,
   Toronto, Miami, Las Vegas, Los Angeles, Seattle, London, Paris, Frankfurt, Barcelona, Innsbruck, İstanbul, Dubai,
@@ -33,7 +43,7 @@
 | Klasör | İçerik |
 |---|---|
 | `uav_fleet_v4/` | Ham X-Plane kareleri (1280x720) + YOLO etiketleri + `state_data.csv` |
-| `uav_fleet_v4_cam/` | Kamera görünümlü hali (rpi-cam-style) + etiketler. Eğitimde bu kullanılır. |
+| `uav_fleet_v4_cam/` | Kamera görünümlü hali (rpi-cam-style) + etiketler. Eğitimde bu kullanılır. Hareket bulanıklığı da burada: karelerin yarısında kamera bulanıklığı (1–3 px), UAV'ların yarısında hedef bulanıklığı (1–5 px); kutu bulanıklıkla birlikte büyür. |
 | `uav_fleet_v4_cam_boxes/` | Kutuları kırmızı, 1 piksel çizilmiş kontrol görüntüleri |
 
 | `arsiv/` | Eski veri setleri (`uav_fleet_v1*`, `uav_fleet_v2*`, `uav_fleet_v3*`, `xp12mm_*`, `sample_mini`, `sample_small`, `pt`) |

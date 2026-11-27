@@ -30,13 +30,12 @@ def test_frames_and_split():
     assert fc.frames_for("uav_001_micro_re_sparrow") == 90
     assert fc.frames_for("uav_166_tactical_talon") == 1150
     assert 165 * 90 + 1150 == 16000
-    assert fc.split_counts(120) == (100, 20) and fc.split_counts(1000) == (833, 167)
 
 
 def test_distance_sampling_ranges_and_mix():
     rng = np.random.default_rng(0)
     ds = np.array([fc.sample_distance(rng, radius=1.0, extent=3.0)[0] for _ in range(6000)])
-    assert ds.min() >= 0.25 - 1e-9 and ds.max() <= 300.0 + 1e-9
+    assert ds.min() >= 0.50 - 1e-9 and ds.max() <= 300.0 + 1e-9
     assert 0.08 < np.mean(ds < 25) < 0.12
     assert 0.47 < np.mean((ds >= 25) & (ds < 180)) < 0.53
     assert 0.37 < np.mean(ds >= 180) < 0.43
@@ -230,3 +229,29 @@ def test_terrain_grid_interpolates_and_falls_back():
     assert abs(empty.ground(50.0, 50.0, fallback=7.0) - 7.0) < 0.01
     far = fc.Terrain(0.0, 0.0, 100.0, np.zeros((2, 2)))
     assert abs(far.ground(10000.0, 0.0) + 7.85) < 0.05                 # earth curvature at 10 km
+
+
+def test_valid_units_takes_whole_units_per_kind_and_spreads_cities():
+    names = [f"uav_{i:03d}_x" for i in range(1, 166)] + [fc.BIG_MODEL]
+    groups = fc.group_plan(names, 7)
+    bgs = [f"bg_{i:03d}" for i in range(fc.BG_UNITS)]
+    units = fc.plan_units(names, groups, bgs, 0, 20, 7, list(fc.CITIES))
+    valid = fc.valid_units(units, 7)
+    assert valid == fc.valid_units(units, 7)                  # the same on every resume
+    kinds = {}
+    for u in units:
+        k = fc.unit_kind(u)
+        n, v = kinds.get(k, (0, 0))
+        kinds[k] = (n + 1, v + (u[0] in valid))
+    assert set(kinds) == {"single", "talon", "m2", "m3", "bg"}
+    for k, (n, v) in kinds.items():
+        assert v == round(n / 6), (k, n, v)
+    per_model = {}
+    for u in units:
+        if fc.unit_kind(u) == "single" and u[0] in valid:
+            per_model[u[2][0]] = per_model.get(u[2][0], 0) + 1
+    assert max(per_model.values()) == 1                       # a 3-block model keeps 2 blocks in train
+    assert len({u[4] for u in units if u[0] in valid}) == len(fc.CITIES)
+    share = sum(u[3] for u in units if u[0] in valid) / sum(u[3] for u in units)
+    assert 0.14 < share < 0.19
+    assert len(fc.valid_units(units[:2], 7)) == 1 and fc.valid_units(units[:1], 7) == set()

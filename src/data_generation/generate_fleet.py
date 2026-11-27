@@ -617,17 +617,17 @@ def load_unit(ctx, infos):
     return loaded
 
 
-def run_unit(ctx, key, prefix, infos, n):
+def run_unit(ctx, key, prefix, infos, n, split="train"):
     """Frames for one unit: a single model (infos = [info]) or a multi-UAV group (2-4 models).
-    Every UAV of a saved frame has its own checked box; one bad box rejects the whole frame."""
+    Every UAV of a saved frame has its own checked box; one bad box rejects the whole frame.
+    All frames of the unit go to `split` (fleet_core.valid_units picks the valid units)."""
     args, client, log, rng = ctx.args, ctx.client, ctx.log, ctx.rng
     k = len(infos)
-    n_train, n_valid = fc.split_counts(n)
     remove_model_files(ctx.root, prefix)
 
     loaded = load_unit(ctx, infos)
     log(f"[{key}] {', '.join(i.name for i in infos)}: yüklendi ({len(loaded)} yeni), {n} kare "
-        f"({n_train} train + {n_valid} valid), yarıçap {', '.join(f'{i.radius:.2f}' for i in infos)} m")
+        f"({split}), yarıçap {', '.join(f'{i.radius:.2f}' for i in infos)} m")
     if loaded:
         time.sleep(LOAD_WAIT_S)
 
@@ -739,7 +739,6 @@ def run_unit(ctx, key, prefix, infos, n):
                 raise RuntimeError(f"{key}: piksel kutusu geometriyle hiç uyuşmuyor")
             continue
 
-        split = "train" if saved < n_train else "valid"
         fn = f"{prefix}_{saved:03d}"
         cv2.imwrite(os.path.join(ctx.root, "images", split, fn + ".jpg"), gtd.resize_frame(frame, args.out_size), JPEG_MAX)
         with open(os.path.join(ctx.root, "labels", split, fn + ".txt"), "w") as f:
@@ -770,16 +769,18 @@ def run_unit(ctx, key, prefix, infos, n):
         f"geometri-piksel kayma ort. dx={mo[0]:.1f} dy={mo[1]:.1f} px")
 
 
-def run_background(ctx, key, n):
+def run_background(ctx, key, n, split="train", phantom=None):
     """Frames without any UAV (empty label file): the detector learns the background. Same plan,
-    weather, places and camera as the UAV frames. Two captures must agree, so nothing moving
-    (birds, a half-loaded scene) is saved, and no X-Plane tag may be on screen."""
+    weather, places and camera as the UAV frames. Each frame is set up as a UAV frame: `phantom()`
+    gives a model, and its UAV is placed with the same distance band, edge and ground checks, but it
+    is never shown (all AI slots stay parked). So the camera states (altitude, look-down, tilt) follow
+    the UAV frames exactly, and no camera state means "no UAV". Two captures must agree, so nothing
+    moving (birds, a half-loaded scene) is saved, and no X-Plane tag may be on screen."""
     args, client, log, rng = ctx.args, ctx.client, ctx.log, ctx.rng
-    n_train, n_valid = fc.split_counts(n)
     remove_model_files(ctx.root, key)
     for slot in range(1, args.ai_slots + 1):
         gtd.set_position(client, park(slot))
-    log(f"[{key}] arka plan: {n} kare ({n_train} train + {n_valid} valid)")
+    log(f"[{key}] arka plan: {n} kare ({split})")
     plan = fc.unit_plan(rng, n, args.daystart, args.dayend)
     rows, saved, tries, net_fail = [], 0, 0, 0
     rejects = {"ground": 0, "net": 0, "label": 0, "unstable": 0}
@@ -790,7 +791,8 @@ def run_background(ctx, key, n):
         if tries > n * 10:
             raise RuntimeError(f"{key}: {tries} denemede {saved}/{n} kare, çok fazla ret {rejects}")
         pl = plan[saved]
-        st = sample_state(rng, [], args, ctx.spots, pl, ctx.terrain, ctx.airports)
+        ghost = [phantom()] if phantom else []        # placed like a real UAV, never shown
+        st = sample_state(rng, ghost, args, ctx.spots, pl, ctx.terrain, ctx.airports)
         if st is None:
             rejects["ground"] += 1
             continue
@@ -821,7 +823,6 @@ def run_background(ctx, key, n):
             adapt(ctx, False)
             continue
         bad_streak = 0
-        split = "train" if saved < n_train else "valid"
         fn = f"{key}_{saved:03d}"
         cv2.imwrite(os.path.join(ctx.root, "images", split, fn + ".jpg"), gtd.resize_frame(a, args.out_size), JPEG_MAX)
         open(os.path.join(ctx.root, "labels", split, fn + ".txt"), "w").close()
@@ -901,7 +902,8 @@ def post_process(args, log):
                "--wb", "1.05,1.0,0.93", "--haze", "0", "--haze-uniform", "0.07",
                "--saturation", "1.0", "--contrast", "0.95", "--blur", "0.4",
                "--photon-scale", "1500", "--read-noise", "0.006", "--jpeg-quality", "70",
-               "--jitter", "0.5", "--seed", str(i), "--min-visible", "0"]
+               "--jitter", "0.5", "--motion-blur", "3", "--motion-prob", "0.5",
+               "--target-blur", "5", "--target-prob", "0.5", "--seed", str(i), "--min-visible", "0"]
         out = open(shard + ".log", "w")
         procs.append((shard, out, subprocess.Popen(cmd, cwd=os.path.expanduser(args.camstyle_dir), env=env,
                                                    stdout=out, stderr=subprocess.STDOUT)))
@@ -1046,7 +1048,18 @@ def main():
             infos[name] = fc.load_model(args.models_dir, name)
         return infos[name]
 
+    def phantom():
+        """A model for the unseen UAV of a background frame, drawn like the UAV frames (talon weighted)."""
+        w = np.array([float(args.frames or fc.frames_for(m)) for m in names])
+        return info_of(names[int(ctx.rng.choice(len(names), p=w / w.sum()))])
+
     units = fc.plan_units(singles, groups, bgs, args.frames, args.group_frames, args.seed, cities)
+    if "valid" not in prog:                           # fixed at the first start, the same on every resume
+        prog["valid"] = sorted(fc.valid_units(units, args.seed))
+        json.dump(prog, open(prog_path, "w"), indent=1)
+    valid = set(prog["valid"])
+    log(f"valid: {len(valid)} birim, {sum(u[3] for u in units if u[0] in valid)} kare "
+        f"(birimin tüm kareleri tek tarafta)")
     for key, prefix, models, n, city in units:
         if key in prog["done"]:
             continue
@@ -1054,10 +1067,11 @@ def main():
             enter_city(ctx, city)
         for attempt in (1, 2):
             try:
+                split = "valid" if key in valid else "train"
                 if models:
-                    run_unit(ctx, key, prefix, [info_of(m) for m in models], n)
+                    run_unit(ctx, key, prefix, [info_of(m) for m in models], n, split)
                 else:
-                    run_background(ctx, key, n)
+                    run_background(ctx, key, n, split, phantom)
                 prog["done"].append(key)
                 break
             except RuntimeError as e:

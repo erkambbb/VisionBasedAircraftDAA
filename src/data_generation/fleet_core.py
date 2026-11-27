@@ -15,7 +15,7 @@ WEATHER_PROBS = (0.40, 0.10, 0.05, 0.05, 0.05, 0.05, 0.30)
 ALT_FT = (150.0, 1000.0)                # ownship height above ground
 FT = 0.3048
 # Distance from the camera to the nearest UAV surface: (low m, high m, share of UAVs, sampling).
-DIST_BANDS = ((0.25, 25.0, 0.10, "log"),
+DIST_BANDS = ((0.50, 25.0, 0.10, "log"),
               (25.0, 180.0, 0.50, "uniform"),
               (180.0, 300.0, 0.40, "uniform"))
 FAR_RANGE_M = (DIST_BANDS[1][0], DIST_BANDS[-1][1])
@@ -35,7 +35,7 @@ MAX_UAV = 4                             # AI aircraft slots the run uses (Flight
 GROUP_FRAMES = 20
 MULTI_GROUPS = {2: 100, 3: 100}         # 2 UAVs: 100 x 20 = 2000 frames; 3-4 UAVs: 2000 frames
 MORE_THAN_2 = ((3, 4), (0.6, 0.4))      # UAV count in a "3" group
-BG_UNITS = 100                          # background-only frames: 100 x 20 = 2000 (no UAV, empty label)
+BG_UNITS = 50                           # background-only frames: 50 x 20 = 1000 (no UAV, empty label)
 TALON_IN_GROUP = 0.5                    # share of groups that include uav_166_tactical_talon
 
 # Cities the ownship flies over, all over the world (X-Plane global scenery is installed; the
@@ -332,10 +332,54 @@ def frames_for(name):
     return FRAMES_BIG_MODEL if name == BIG_MODEL else FRAMES_PER_MODEL
 
 
-def split_counts(n):
-    """(train, valid) with about one sixth validation: 120 -> (100, 20), 1000 -> (833, 167)."""
-    valid = int(round(n / 6.0))
-    return n - valid, valid
+VALID_SHARE = 1 / 6   # share of whole units (blocks, groups, background sets) that go to valid
+
+
+def unit_kind(unit):
+    """Kind of a plan_units entry, for the train/valid split: talon, single, m2, m3 or bg."""
+    key, _, models = unit[:3]
+    if not models:
+        return "bg"
+    if len(models) > 1:
+        return key.split("_")[0]
+    return "talon" if models[0] == BIG_MODEL else "single"
+
+
+def valid_units(units, seed, share=VALID_SHARE):
+    """Keys of the units whose frames all go to valid; every other unit is all train.
+    Frames of one unit (a model's ~30-frame block, a group, a background set) share model, city and
+    weather blocks, so they never sit on both sides of the split. Each kind (talon, single, m2, m3, bg)
+    gets `share` of its units, spread over the cities, and a model loses at most its share of blocks
+    (a 3-block model: at most 1 block in valid)."""
+    rng = np.random.default_rng([seed, 61])
+    kinds = {}
+    for u in units:
+        kinds.setdefault(unit_kind(u), []).append(u)
+    out = set()
+    for kind in sorted(kinds):
+        us = kinds[kind]
+        k = int(round(len(us) * share))
+        if k == 0:
+            continue
+        per_model = {}
+        for u in us:
+            per_model.setdefault(tuple(u[2]), []).append(u)
+        cap = {m: max(1, math.ceil(len(v) * share)) for m, v in per_model.items()}
+        keys = rng.random(len(us))
+        order = [u for _, u in sorted(zip(keys, us), key=lambda t: (str(t[1][4]), t[0]))]
+        r, n, used = float(rng.random()), len(order), {}
+        for j in range(k):
+            i = int((j + r) * n / k)
+            for step in range(n):
+                u = order[(i + step) % n]
+                m = tuple(u[2])
+                if u[0] not in out and used.get(m, 0) < cap[m]:
+                    out.add(u[0])
+                    used[m] = used.get(m, 0) + 1
+                    break
+    if not out and len(units) >= 2:
+        out.add(units[int(rng.integers(len(units)))][0])
+    return out
 
 
 def far_limit_m(extent, min_px, hi=FAR_RANGE_M[1]):

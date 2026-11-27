@@ -80,8 +80,8 @@ def test_run_model_writes_dataset(tmp_path, monkeypatch):
                                 spots=None, loaded={}, terrain=None, airports=[])
     gf.run_model(ctx, 1, "uav_001_x", info)
 
-    assert len(os.listdir(root / "images/train")) == 10 and len(os.listdir(root / "images/valid")) == 2
-    assert len(os.listdir(root / "labels/train")) == 10
+    assert len(os.listdir(root / "images/train")) == 12 and len(os.listdir(root / "images/valid")) == 0
+    assert len(os.listdir(root / "labels/train")) == 12      # a whole unit goes to one split
     lines = csv.read_text().strip().splitlines()
     assert len(lines) == 13 and lines[0].count(",") == lines[1].count(",")
     lab = (root / "labels/train/u001_000.txt").read_text().split()
@@ -242,7 +242,7 @@ def test_multi_uav_frame_gets_one_box_per_uav(tmp_path, monkeypatch):
     rows = csv.read_text().strip().splitlines()[1:]
     assert len(rows) == 12 and all(r.split(",")[-13] == "2" for r in rows)
     assert all(len(r.split(",")) == gf.CSV_HEADER.count(",") + 1 for r in rows)
-    assert len(os.listdir(root / "images/train")) == 5 and len(os.listdir(root / "images/valid")) == 1
+    assert len(os.listdir(root / "images/train")) == 6 and len(os.listdir(root / "images/valid")) == 0
     gf.run_unit(ctx, "m2_000", "m2_000", infos, 2)  # models already in their slots: no reload
     assert len(sw_.calls) == 2
     geoms[1] = ((960.0, 540.0, 40.0, 20.0), rect(940, 530, 980, 550))   # second UAV on top of the first
@@ -269,9 +269,18 @@ def test_background_frames_have_empty_labels_and_full_rows(tmp_path, monkeypatch
                                 labels_removed=0, last_check=0.0, recent=[], period=0.05, settle=6, good=0, crop=None,
                                 spots=fc.spot_offsets("New York"), loaded={}, terrain=None,
                                 airports=fc.airport_offsets("New York"))
-    gf.run_background(ctx, "bg_000", 20)
-    assert len(os.listdir(root / "images/train")) == 17 and len(os.listdir(root / "images/valid")) == 3
-    assert (root / "labels/train/bg_000_000.txt").read_text() == ""
+    hull = np.array([[x, y, z] for x in (-1, 1) for y in (-.2, .5) for z in (-1, 1.4)])
+    ghost = fc.ModelInfo("uav_001_x", "Aircraft/x.acf", hull, radius=1.7, extent=2.4)
+    asked = []
+    placed = []
+    real_set = gtd.set_position
+    monkeypatch.setattr(gtd, "set_position", lambda client, ac: (placed.append(ac.id), real_set(client, ac)))
+    gf.run_background(ctx, "bg_000", 20, "valid", lambda: asked.append(1) or ghost)
+    assert len(os.listdir(root / "images/valid")) == 20 and len(os.listdir(root / "images/train")) == 0
+    assert (root / "labels/valid/bg_000_000.txt").read_text() == ""
+    assert len(asked) >= 20                                            # every frame is set up with a UAV
+    assert set(placed) <= {0} | set(range(1, ctx.args.ai_slots + 1)) and placed.count(0) >= 20
+    assert all(p == 0 for p in placed[ctx.args.ai_slots:])             # but only the parked slots, never the ghost
     rows = csv.read_text().strip().splitlines()
     assert len(rows) == 21 and all(r.count(",") == rows[0].count(",") for r in rows)
     clouds = [r.split(",")[4] for r in rows[1:]]
