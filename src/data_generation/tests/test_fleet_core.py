@@ -35,10 +35,10 @@ def test_frames_and_split():
 def test_distance_sampling_ranges_and_mix():
     rng = np.random.default_rng(0)
     ds = np.array([fc.sample_distance(rng, radius=1.0, extent=3.0)[0] for _ in range(6000)])
-    assert ds.min() >= 0.50 - 1e-9 and ds.max() <= 300.0 + 1e-9
+    assert ds.min() >= 0.50 - 1e-9 and ds.max() <= 220.0 + 1e-9
     assert 0.08 < np.mean(ds < 25) < 0.12
-    assert 0.47 < np.mean((ds >= 25) & (ds < 180)) < 0.53
-    assert 0.37 < np.mean(ds >= 180) < 0.43
+    assert 0.52 < np.mean((ds >= 25) & (ds < 150)) < 0.58
+    assert 0.32 < np.mean(ds >= 150) < 0.38
 
 
 def test_small_model_far_band_shrinks_below_its_limit():
@@ -49,7 +49,8 @@ def test_small_model_far_band_shrinks_below_its_limit():
 
 
 def test_small_model_gets_shorter_far_limit():
-    assert fc.far_limit_m(3.0, 8.0) == 300.0
+    assert fc.far_limit_m(3.0, 8.0) == 220.0
+    assert 200 < fc.far_limit_m(1.0) < 210           # default 12 px: a 1 m UAV stops at ~204 m
     lim = fc.far_limit_m(0.2, 8.0)
     assert 55 < lim < 65                       # 2444 * 0.2 / 8
 
@@ -184,7 +185,7 @@ def test_spots_stay_away_from_airports():
     rng = np.random.default_rng(1)
     for city in fc.CITIES:
         spots, ap = fc.spot_offsets(city), fc.airport_offsets(city)
-        assert ap and all(len(a) == 3 for a in ap)
+        assert all(len(a) == 3 for a in ap)           # some rural regions have no airport within 45 km
         for cat in fc.SPOT_CATEGORIES:
             for _ in range(60):
                 name, e, n, g = fc.sample_spot(rng, spots, 0, cat, ap)
@@ -210,7 +211,15 @@ def test_plan_units_spreads_cities_evenly():
     per = {}
     for u in units:
         per[u[4]] = per.get(u[4], 0) + u[3]
-    assert set(per) == set(fc.CITIES) and max(per.values()) - min(per.values()) <= 30
+    assert set(per) == set(fc.CITIES)
+    w = dict(zip(fc.CITIES, fc.region_weights(list(fc.CITIES))))
+    assert all(abs(per[c] - w[c] * 22000) <= 30 for c in fc.CITIES)          # frames follow the weights
+    groups = {}
+    for c, n in per.items():
+        groups[fc.region_group(c)] = groups.get(fc.region_group(c), 0) + n
+    assert abs(groups["rural_tr"] / 22000 - 0.40) < 0.005 and abs(groups["city"] / 22000 - 0.40) < 0.005
+    for kind in ("single", "m2", "m3", "bg"):                                  # every kind is everywhere
+        assert sum(fc.region_group(u[4]) != "city" for u in units if fc.unit_kind(u) == kind) > 0
     order = [u[4] for u in units]
     assert sum(a != b for a, b in zip(order, order[1:])) == len(fc.CITIES) - 1   # one visit per city
     for n in names[:20]:
@@ -255,3 +264,15 @@ def test_valid_units_takes_whole_units_per_kind_and_spreads_cities():
     share = sum(u[3] for u in units if u[0] in valid) / sum(u[3] for u in units)
     assert 0.14 < share < 0.19
     assert len(fc.valid_units(units[:2], 7)) == 1 and fc.valid_units(units[:1], 7) == set()
+
+
+def test_rural_regions_have_only_rural_spots_and_city_mix_is_20_50_30():
+    assert set(fc.RURAL_TR + fc.RURAL_WORLD) <= set(fc.CITIES) and len(fc.RURAL_TR) >= 10
+    for r in fc.RURAL_TR + fc.RURAL_WORLD:
+        assert {s[5] for s in fc.SPOTS[r]} == {"rural"} and fc.region_group(r) != "city"
+    assert fc.CATEGORY_PROBS == (0.20, 0.50, 0.30)
+    rng = np.random.default_rng(3)
+    name, e, n, g = fc.sample_spot(rng, fc.spot_offsets("Siirt Kurtalan"), 0, "dense",
+                                   fc.airport_offsets("Siirt Kurtalan"))
+    assert name in {s[0] for s in fc.SPOTS["Siirt Kurtalan"]}                 # a city category falls back to rural
+    assert abs(sum(fc.GROUP_SHARES.values()) - 1) < 1e-9

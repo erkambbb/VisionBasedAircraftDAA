@@ -17,20 +17,26 @@
   Her türden (tek model, talon, 2 UAV, 3-4 UAV, arka plan) birimlerin 1/6'sı valid, şehirlere yayılır;
   bir model en çok 1 bloğunu valid'e verir. Toplam ~3480 kare valid (%16.6). Seçim ilk başlatmada
   `progress.json` içine (`valid`) yazılır, `--resume` aynısını kullanır.
-- Mesafe (kameraya en yakın yüzey): %10 0.50–25 m (log), %50 25–180 m, %40 180–300 m.
-  Küçük modelde 300 m'de uçak 8 pikselden küçük kalırsa üst sınır düşer (`--min-px 8`).
+- Mesafe (kameraya en yakın yüzey): %10 0.50–25 m (log), %55 25–150 m, %35 150–220 m. 220 m'den ötesinde takip yapılamaz.
+  En küçük UAV 1280 genişlikte 12 piksel (`--min-px 12`, 640 girişte 6 px). Küçük modelde üst sınır buna göre düşer
+  (1 m'lik UAV en çok ~204 m).
 - Hava (20 karede bir): %40 açık, %10 ince bulut, %5 bulutlu, %5 yağmur, %5 fırtına, %5 sis, %30 karışık
   (rastgele katmanlar, pus, hafif yağmur). Bulut tabanı her zaman ownship'in üstünde.
 - Eğim: UAV pitch ve roll ±60°'ye kadar, ownship (kamerayı taşıyan uçak) roll ±45°, aşağı bakmayan karelerde pitch ±10°'ye kadar
   (%50 düz, sonra çeyrekler %20/%15/%10/%5, işaret rastgele). Kamera ownship'e sabit, eğilince ufuk da döner.
-- Ownship zeminden 150–1000 ft yüksekte. Karelerin %45'inde kamera aşağı bakar (-8 ile -35 derece), UAV şehrin önünde görünür.
-- Konum: dünyada 17 şehir (`fleet_core.CITIES`, `fleet_core.SPOTS`, toplam 163 nokta): New York, Chicago, Washington DC,
-  Toronto, Miami, Las Vegas, Los Angeles, Seattle, London, Paris, Frankfurt, Barcelona, Innsbruck, İstanbul, Dubai,
-  Tokyo, Sydney. Her şehirde gökdelen/yüksek blok, orta katlı ve alçak ev noktaları (%45/%25/%30).
+- Ownship zeminden 150–1000 ft yüksekte. Karelerin %45'inde kamera aşağı bakar (-8 ile -35 derece), UAV zeminin önünde görünür.
+- Konum: 35 bölge (`fleet_core.CITIES`, `fleet_core.SPOTS`), kare payları `fleet_core.GROUP_SHARES`:
+  - %40 Türkiye kırsalı, 11 bölge (yarışma alanı gibi tarla, köy, alçak tepe): Siirt Kurtalan, Konya Çumra, Eskişehir Alpu,
+    Ankara Polatlı, Edirne Keşan, Kayseri Develi, Erzurum Pasinler, Diyarbakır Bismil, Aksaray, Bursa Karacabey, Şanlıurfa Harran.
+  - %20 dünya kırsalı, 7 bölge: Iowa, Kansas, Castilla (İspanya), Beauce (Fransa), Po Ovası (İtalya), Alföld (Macaristan), Riverina (Avustralya).
+  - %40 şehir, 17 şehir: New York, Chicago, Washington DC, Toronto, Miami, Las Vegas, Los Angeles, Seattle, London, Paris,
+    Frankfurt, Barcelona, Innsbruck, İstanbul, Dubai, Tokyo, Sydney. Şehir içinde gökdelen %20, orta katlı %50, alçak yapı %30.
+  - Kırsal bölgede 5 nokta: merkez ve ~6,5 km kuzey/güney/doğu/batı, her biri ±2,5 km.
   Bina arkasında kalan UAV'lı kare kutu tutmadığı için atılır.
-- Her modelin 90 karesi 30'luk 3 bloğa bölünür, her blok başka şehirde. Grup ve arka plan setleri (20 kare) tek şehir.
-  Şehirler sırayla dağıtılır (her şehre ~1290 kare); çalışma şehir şehir gider, her şehre bir kez geçilir
-  (`fleet_core.plan_units`). Şehre geçişte sahnenin yüklenmesi beklenir (en çok 240 sn + 15 sn).
+- Her modelin 90 karesi 30'luk 3 bloğa bölünür, her blok başka bölgede. Grup ve arka plan setleri (20 kare) tek bölge.
+  Bölgelere kare ağırlığa göre dağılır (Türkiye kırsalında bölge başına ~760, dünya kırsalında ~600, şehirde ~500 kare).
+  Talon (38 blok) da aynı ağırlıklarla dağılır. Çalışma bölge bölge gider, her bölgeye bir kez geçilir
+  (`fleet_core.plan_units`). Bölgeye geçişte sahnenin yüklenmesi beklenir (en çok 240 sn + 15 sn).
 - Havalimanları X-Plane'in `apt.dat` dosyasından gelir (`make_city_airports.py` -> `city_airports.py`):
   pisti 1500 m ve üstü olanlara 4 km, küçüklere 1,5 km'den yakın uçulmaz; yerde uçak görünmesin.
   X-Plane'de park halindeki uçaklar zaten kapalı (`renopt_static_acf 0`).

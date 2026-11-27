@@ -6,7 +6,7 @@
 
 | Kaynak | Kare | UAV var mı | Not |
 |---|---|---|---|
-| Sentetik UAV (`uav_fleet_v4_cam`) | 20 000 | var | 16 000 tek UAV, 2000 iki UAV, 2000 üç-dört UAV |
+| Sentetik UAV (`uav_fleet_v4_cam`) | 20 000 | var | 16 000 tek UAV, 2000 iki UAV, 2000 üç-dört UAV; %60 kırsal (%40 Türkiye), %40 şehir |
 | Sentetik arka plan (`bg_*`) | 1000 | yok | UAV karesi gibi kurulur, UAV gösterilmez |
 | Gerçek UAV | 30 000 | var | |
 | Gerçek arka plan | 2000 | yok | Mümkünse yarışma kamerası ve yarışma alanı |
@@ -40,15 +40,19 @@ Tek sınıf vardır: `0 = uav`. Bütün kaynaklarda sınıf numarası 0 olmalı.
 ### Görüntü ve etiket kontrolü
 - Sentetik için `_cam` sürümünü kullan, ham sürümü değil. Hareket bulanıklığı ve kamera taklidi `_cam`'de. Gerçek fotoğraflara camstyle uygulanmaz.
 - Negatif görüntülerde label dosyası boş olsun ya da hiç olmasın. İki model de bunu "nesne yok" olarak okur.
-- Gerçek etiketlerde 1280 genişlikte 4 pikselin altındaki kutuları gözden geçir. Bunlar ya etiketleme hatasıdır ya da hiçbir model bulamaz.
+- Gerçek etiketlerde 1280 genişlikte 8 pikselin (640 girişte 4 px) altındaki kutuları gözden geçir. Bunlar ya etiketleme hatasıdır ya da hiçbir model bulamaz.
 - Her kaynaktan 50 görüntüyü kutularla çizip gözle kontrol et (`draw_boxes.py`).
 
-### Çözünürlük
-- Veri 1280×720'dir. Sentetik setteki en küçük UAV 1280 genişlikte 8 pikseldir.
-- 640'ta eğitilirse bu UAV 4 piksele düşer ve kaçar. Bu yüzden imgsz 1280 ile eğit. Bellek yetmezse 960 ya da 1024 kullan, 640'ın altına inme.
-- Inference aynı çözünürlükte yapılır. Yarışma donanımında FPS'i ölç.
-- **YOLO26:** `imgsz=1280`. Küçük nesneler için ayrıca `yolo26s-p2.yaml` (P2 başlığı) dene. P2 için hazır ağırlık yok: `YOLO("yolo26s-p2.yaml").load("yolo26s.pt")` ile omurga yüklenir.
-- **RF-DETR:** `resolution`, modelin `patch_size × num_windows` değerinin katı olmalı (dokümana göre deteksiyonda 32'nin katı). 1280'e yakın bir kat seç, bellek yetmezse 1024.
+### Çözünürlük ve donanım
+- **Donanım:** T3 Gemstone (TI AM67A), RPi HQ kamera (IMX477R, 12 mm), en az 15 FPS. Kaptanın ölçümü 18-19 FPS, ama hangi giriş boyutunda olduğu bilinmiyor.
+- **Önce FPS'i ölç:** Her iki model için Gemstone'da 640, 800 ve 960 girişle ölç. 15 FPS'i sağlayan en büyük boyutu seç.
+- **Eğitim ve inference aynı boyutta:** Seçilen boyut eğitimde de kullanılır (imgsz / resolution).
+- **Küçük UAV:** Veri 1280×720. Sentetik setteki en küçük UAV 1280 genişlikte 12 piksel, yani 640 girişte 6 piksel. Uzak sınır 220 m: 1,7 m'lik bir UAV 640'ta ~9 piksel.
+- **Kaçarsa:** 640'ta küçük UAV kaçıyorsa giriş boyutunu 800-960'a çıkar ya da P2 başlığını dene.
+- **YOLO26:** P2 başlığı `yolo26s-p2.yaml`. P2'nin hazır ağırlığı yok, omurga `YOLO("yolo26s-p2.yaml").load("yolo26s.pt")` ile yüklenir. P2 başlığı FPS'i düşürür, Gemstone'da ölç.
+- **RF-DETR:** `resolution`, `patch_size × num_windows` değerinin katı olmalı (dokümana göre 32'nin katı: 640, 800, 960).
+  - RF-DETR deformable attention kullanır. TI'nin derleyicisi (TIDL) bu katmanları hızlandıramazsa iş ARM işlemciye düşer ve FPS çok düşer.
+  - Kaptanın 18-19 FPS'i hangi modelde alındı, netleştir. RF-DETR'i Gemstone'a derleyip FPS'i karşılaştırmadan seçme.
 
 ### Format
 - İki model de YOLO formatını okur: `data.yaml` + `images/train|valid` + `labels/train|valid`. RF-DETR YOLO klasörünü otomatik tanır.
@@ -65,7 +69,7 @@ Küçük UAV'ı bozan augmentasyonlar düşük tutulur: güçlü küçültme, mi
 from ultralytics import YOLO
 model = YOLO("yolo26s.pt")            # ya da yolo26m.pt; küçük nesne için yolo26s-p2.yaml denemesi
 model.train(
-    data="all.yaml", imgsz=1280, epochs=150, batch=-1,
+    data="all.yaml", imgsz=640, epochs=150, batch=-1,    # Gemstone'da seçilen boyut (640/800/960)
     hsv_h=0.015, hsv_s=0.5, hsv_v=0.4,      # renk ve parlaklık: hava ve saat farkları
     degrees=10.0,                           # küçük döndürme: kamera roll'u
     translate=0.1, scale=0.4,               # 0.5'ten fazla küçültme 8 px UAV'ı yok eder
@@ -92,7 +96,7 @@ aug = {
     "ImageCompression": {"quality_range": (55, 95), "p": 0.3},
 }
 model.train(dataset_dir="datasets/all", epochs=60, batch_size=4, grad_accum_steps=4,
-            resolution=1024, aug_config=aug)
+            resolution=640, aug_config=aug)           # Gemstone'da seçilen boyut (640/800/960)
 ```
 - Kurulum: `pip install "rfdetr[train,augment]"`. Hazır presetler `rfdetr.datasets.aug_configs` altında (1.8.0'dan önceki sürümlerde modülün adı tekil: `aug_config`).
 - `AUG_AERIAL` kullanma. Yukarıdan bakış içindir, dikey çevirme ve büyük döndürme yapar.

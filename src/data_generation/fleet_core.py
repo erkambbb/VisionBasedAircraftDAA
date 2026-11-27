@@ -15,9 +15,12 @@ WEATHER_PROBS = (0.40, 0.10, 0.05, 0.05, 0.05, 0.05, 0.30)
 ALT_FT = (150.0, 1000.0)                # ownship height above ground
 FT = 0.3048
 # Distance from the camera to the nearest UAV surface: (low m, high m, share of UAVs, sampling).
+# The far end is 220 m: beyond that a chase is not possible, and on a 640 px model input a 1.7 m
+# UAV at 220 m is still ~9 px wide (19 px at 1280).
 DIST_BANDS = ((0.50, 25.0, 0.10, "log"),
-              (25.0, 180.0, 0.50, "uniform"),
-              (180.0, 300.0, 0.40, "uniform"))
+              (25.0, 150.0, 0.55, "uniform"),
+              (150.0, 220.0, 0.35, "uniform"))
+MIN_PX = 12.0                           # smallest UAV (longest side, 1280 px wide frame): 6 px on a 640 input
 FAR_RANGE_M = (DIST_BANDS[1][0], DIST_BANDS[-1][1])
 EDGE_FRACTION = 0.15                    # share of UAVs cut by the picture edge
 DOWNLOOK_FRACTION = 0.45                # share of frames looking down onto the city (busy background)
@@ -59,7 +62,60 @@ CITIES = {
     "Dubai": (25.2048, 55.2708, 4, 0, False),
     "Tokyo": (35.6762, 139.6503, 9, 0, False),
     "Sydney": (-33.8688, 151.2093, 10, 1, True),
+    # rural regions (fields, villages, low hills): Turkey, where the competition is flown, and abroad
+    "Siirt Kurtalan": (37.9000, 41.7600, 3, 0, False),
+    "Konya Cumra": (37.5000, 32.7000, 3, 0, False),
+    "Eskisehir Alpu": (39.8000, 30.9000, 3, 0, False),
+    "Ankara Polatli": (39.6500, 32.0500, 3, 0, False),
+    "Edirne Kesan": (40.8000, 26.5500, 3, 0, False),
+    "Kayseri Develi": (38.4200, 35.4000, 3, 0, False),
+    "Erzurum Pasinler": (39.9800, 41.5500, 3, 0, False),
+    "Diyarbakir Bismil": (37.8800, 40.5500, 3, 0, False),
+    "Aksaray Ova": (38.3000, 33.9000, 3, 0, False),
+    "Bursa Karacabey": (40.1800, 28.2500, 3, 0, False),
+    "Sanliurfa Harran": (36.9500, 39.0000, 3, 0, False),
+    "Iowa Farmland": (42.1000, -93.3000, -6, 1, False),
+    "Kansas Plains": (38.5000, -97.9000, -6, 1, False),
+    "Castilla Meseta": (41.4500, -5.1000, 1, 1, False),
+    "Beauce": (48.2500, 1.7000, 1, 1, False),
+    "Po Valley": (45.1000, 9.8000, 1, 1, False),
+    "Alfold": (47.1000, 20.3000, 1, 1, False),
+    "Riverina": (-34.5000, 147.2000, 10, 1, True),
 }
+# Share of all frames per region group; inside a group every region gets the same share.
+RURAL_TR = ("Siirt Kurtalan", "Konya Cumra", "Eskisehir Alpu", "Ankara Polatli", "Edirne Kesan", "Kayseri Develi",
+            "Erzurum Pasinler", "Diyarbakir Bismil", "Aksaray Ova", "Bursa Karacabey", "Sanliurfa Harran")
+RURAL_WORLD = ("Iowa Farmland", "Kansas Plains", "Castilla Meseta", "Beauce", "Po Valley", "Alfold", "Riverina")
+GROUP_SHARES = {"rural_tr": 0.40, "rural_world": 0.20, "city": 0.40}
+# Rural regions: ground estimate m MSL; spots are the origin and 4 points ~6.5 km around it.
+RURAL_GROUND = {"Siirt Kurtalan": 620.0, "Konya Cumra": 1010.0, "Eskisehir Alpu": 760.0, "Ankara Polatli": 850.0,
+                "Edirne Kesan": 100.0, "Kayseri Develi": 1150.0, "Erzurum Pasinler": 1650.0,
+                "Diyarbakir Bismil": 540.0, "Aksaray Ova": 950.0, "Bursa Karacabey": 30.0,
+                "Sanliurfa Harran": 400.0, "Iowa Farmland": 300.0, "Kansas Plains": 500.0,
+                "Castilla Meseta": 720.0, "Beauce": 140.0, "Po Valley": 60.0, "Alfold": 90.0, "Riverina": 250.0}
+RURAL_SPREAD_M = 2500.0
+RURAL_STEP_DEG = 0.06
+
+
+def region_group(name):
+    return "rural_tr" if name in RURAL_TR else "rural_world" if name in RURAL_WORLD else "city"
+
+
+def region_weights(names):
+    """Share of the frames for each region in `names` (GROUP_SHARES split evenly inside a group;
+    a group with no region in `names` gives its share to the others)."""
+    groups = [region_group(n) for n in names]
+    w = np.array([GROUP_SHARES[g] / groups.count(g) for g in groups], float)
+    return w / w.sum()
+
+
+def rural_spots(name):
+    lat, lon = CITIES[name][:2]
+    g = RURAL_GROUND[name]
+    dlon = RURAL_STEP_DEG / math.cos(math.radians(lat))
+    pts = (("center", 0, 0), ("north", RURAL_STEP_DEG, 0), ("south", -RURAL_STEP_DEG, 0),
+           ("east", 0, dlon), ("west", 0, -dlon))
+    return tuple((f"{p}", lat + a, lon + b, g, RURAL_SPREAD_M, "rural") for p, a, b in pts)
 # Where the ownship flies: (name, lat, lon, ground estimate m MSL, spread m, category).
 # Categories: "dense" skyscrapers and high-rise blocks, "mid" 4-8 storey blocks, "low" houses and low-rise.
 # The ground estimate is only a fallback: the real terrain height comes from the UavSwitch probe grid.
@@ -264,8 +320,9 @@ SPOTS = {
         ("strathfield", -33.8790, 151.0830, 30.0, 1200.0, "low"),
     ),
 }
-SPOT_CATEGORIES = ("dense", "mid", "low")
-CATEGORY_PROBS = (0.45, 0.25, 0.30)
+SPOTS.update({name: rural_spots(name) for name in RURAL_TR + RURAL_WORLD})
+SPOT_CATEGORIES = ("dense", "mid", "low")   # city spots; a rural region has only "rural" spots
+CATEGORY_PROBS = (0.20, 0.50, 0.30)
 # The ownship never flies near an airport, so no aircraft on the ground can show up in a frame.
 # (Parked/static aircraft are also off in the X-Plane settings: renopt_static_acf 0.)
 # Land airports from X-Plane's apt.dat near each city (make_city_airports.py writes city_airports.py):
@@ -382,12 +439,12 @@ def valid_units(units, seed, share=VALID_SHARE):
     return out
 
 
-def far_limit_m(extent, min_px, hi=FAR_RANGE_M[1]):
+def far_limit_m(extent, min_px=MIN_PX, hi=FAR_RANGE_M[1]):
     """Largest surface distance at which the longest side still spans min_px output pixels."""
     return float(min(hi, max(FAR_RANGE_M[0] + 1.0, F_OUT_PX * extent / min_px)))
 
 
-def sample_distance(rng, radius, extent, min_px=8.0, band=None):
+def sample_distance(rng, radius, extent, min_px=MIN_PX, band=None):
     """(d_surface, d_center) in meters. d_center = d_surface + radius (aircraft origin to camera).
     `band` (index into DIST_BANDS) comes from the unit plan; None = random by share.
     A band beyond the far limit of a small model (too few pixels) shrinks to the part below it."""
@@ -547,16 +604,36 @@ def split_blocks(n, size=BLOCK_FRAMES):
     return [n // k + (1 if i < n % k else 0) for i in range(k)]
 
 
-def assign_cities(counts, seed):
-    """One city per block for blocks listed as counts per unit, spread evenly: the cities go round in
-    a shuffled order, and the blocks of one unit always get different cities."""
+def assign_cities(sizes, seed, names=None):
+    """One region per block. `sizes` lists the frame counts of the blocks of each unit. Every region
+    gets frames by its weight (region_weights: rural Turkey, rural abroad, cities), the blocks of one
+    unit always get different regions, and the units are taken in a shuffled order, so every kind
+    (single, group, background) is spread over all regions. A long unit (more blocks than a quarter
+    of the regions, the talon) is placed first and follows the weights by itself, so the talon is
+    in rural Turkey as often as any other model; its blocks may then share a region."""
     rng = np.random.default_rng([seed, 77])
-    names = list(CITIES)
-    order = [names[i] for i in rng.permutation(len(names))]
-    out, k = [], 0
-    for c in counts:
-        out.append([order[(k + j) % len(order)] for j in range(c)])
-        k += c
+    names = list(CITIES) if names is None else list(names)
+    w = region_weights(names)
+    target = w * float(sum(sum(s) for s in sizes))
+    got = np.zeros(len(names))
+    tie = rng.random(len(names)) * 1e-6
+    out = [None] * len(sizes)
+    long_ = [i for i in range(len(sizes)) if len(sizes[i]) > len(names) / 4]
+    order = long_ + [int(i) for i in rng.permutation(len(sizes)) if int(i) not in long_]
+    for i in order:
+        picks = []
+        own_target, own_got = w * float(sum(sizes[i])), np.zeros(len(names))
+        for k in sizes[i]:
+            if i in long_:
+                free = (own_target - own_got) / own_target + tie
+            else:
+                free = (target - got) / target + tie
+                free[[names.index(p) for p in picks]] = -np.inf
+            j = int(np.argmax(free))
+            picks.append(names[j])
+            got[j] += k
+            own_got[j] += k
+        out[i] = picks
     return out
 
 
@@ -571,7 +648,7 @@ def plan_units(singles, groups, bgs, frames, group_frames, seed, cities):
     if not cities:
         return [(key, key, models, k, None) for unit in blocks for key, models, k in unit]
     names = list(CITIES)
-    picks = assign_cities([len(u) for u in blocks], seed)
+    picks = assign_cities([[k for _, _, k in u] for u in blocks], seed)
     units = [(key, key, models, k, names.index(c) if c in cities else None)
              for unit, cs in zip(blocks, picks) for (key, models, k), c in zip(unit, cs)]
     # cities left out by the caller: their blocks go round the chosen ones

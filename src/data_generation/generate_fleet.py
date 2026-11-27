@@ -947,7 +947,7 @@ def parse_args(argv=None):
     ap.add_argument("--workspace", type=int, default=1, help="move X-Plane to this workspace (0-based) so you never see it; -1 = leave")
     ap.add_argument("--daystart", type=float, default=8.0)
     ap.add_argument("--dayend", type=float, default=18.0)
-    ap.add_argument("--min-px", type=float, default=8.0, help="smallest UAV size (output pixels, longest side)")
+    ap.add_argument("--min-px", type=float, default=fc.MIN_PX, help="smallest UAV size (output pixels, longest side)")
     ap.add_argument("--frames", type=int, default=0, help="override frames per model (testing)")
     ap.add_argument("--only", default=None, help="comma list of model numbers, e.g. 1,2,166")
     ap.add_argument("--smoke", action="store_true", help="3 models x 4 frames + 2 groups x 4 into dataset 'uav_smoke'")
