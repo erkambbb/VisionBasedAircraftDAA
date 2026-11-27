@@ -22,6 +22,13 @@ FAR_RANGE_M = (DIST_BANDS[1][0], DIST_BANDS[-1][1])
 EDGE_FRACTION = 0.15                    # share of UAVs cut by the picture edge
 DOWNLOOK_FRACTION = 0.45                # share of frames looking down onto the city (busy background)
 DOWNLOOK_PITCH = (-35.0, -8.0)
+# Tilt ladder for pitch and roll: [flat, then 4 quarters of the max angle, random sign]. Used for
+# the UAVs (up to UAV_TILT_MAX) and for our own aircraft (dive/climb up to OWN_PITCH_MAX, roll OWN_ROLL_MAX).
+TILT_PROBS = (0.50, 0.20, 0.15, 0.10, 0.05)
+TILT_KEYS = ("own_p", "own_r", "uav_p", "uav_r")
+UAV_TILT_MAX = 60.0
+OWN_PITCH_MAX = 10.0
+OWN_ROLL_MAX = 45.0
 SUMMER_DAYS = (171, 264)                # day of year, 21 June .. 22 September
 MAX_UAV = 4                             # AI aircraft slots the run uses (Flight Configuration: 4 AI aircraft)
 # Multi-UAV groups: one combination of models, GROUP_FRAMES frames, one weather state.
@@ -363,11 +370,31 @@ def apart(placed, hang, vang, ang_r, margin_deg=1.0):
     return all(math.hypot(hang - h, vang - v) > 1.25 * (ang_r + r) + margin_deg for h, v, r in placed)
 
 
-def sample_pitch(rng, down=None):
-    """Camera pitch (deg): often looking down onto the city so the UAV sits on a busy background."""
+def sample_tilt_cat(rng):
+    return int(rng.choice(len(TILT_PROBS), p=TILT_PROBS))
+
+
+def tilt_value(rng, cat, max_deg):
+    """Signed tilt (deg). cat 0: flat; cat k (1..4): uniform in the k-th quarter of max_deg, random sign."""
+    if cat == 0:
+        return 0.0
+    v = float(rng.uniform((cat - 1) / 4 * max_deg, cat / 4 * max_deg))
+    return v if rng.random() < 0.5 else -v
+
+
+def uav_attitude(rng, cat_p=None, cat_r=None):
+    """(pitch, roll) of a UAV in degrees, both on the tilt ladder up to UAV_TILT_MAX."""
+    cat_p = sample_tilt_cat(rng) if cat_p is None else cat_p
+    cat_r = sample_tilt_cat(rng) if cat_r is None else cat_r
+    return tilt_value(rng, cat_p, UAV_TILT_MAX), tilt_value(rng, cat_r, UAV_TILT_MAX)
+
+
+def sample_pitch(rng, down=None, cat=None):
+    """Camera pitch (deg): often looking down onto the city so the UAV sits on a busy background;
+    otherwise a dive or climb of up to OWN_PITCH_MAX on the tilt ladder."""
     if (rng.random() < DOWNLOOK_FRACTION) if down is None else down:
         return float(rng.uniform(*DOWNLOOK_PITCH))
-    return float(np.clip(rng.normal(0, 5), -30, 30))
+    return tilt_value(rng, sample_tilt_cat(rng) if cat is None else cat, OWN_PITCH_MAX)
 
 
 def sample_day(rng):
@@ -461,8 +488,10 @@ def unit_plan(rng, n, daystart, dayend):
     times = spread_values(rng, n, daystart * 3600, dayend * 3600)
     alts = spread_values(rng, n, ALT_FT[0] * FT, ALT_FT[1] * FT)
     days = spread_values(rng, n, SUMMER_DAYS[0], SUMMER_DAYS[1] + 1)
+    tilt = {k: shuffled(TILT_PROBS) for k in TILT_KEYS}
     return [dict(weather=weather[i], band=int(band[i]), category=SPOT_CATEGORIES[cat[i]], down=bool(down[i]),
-                 local_time=float(times[i]), alt=float(alts[i]), day=int(days[i])) for i in range(n)]
+                 local_time=float(times[i]), alt=float(alts[i]), day=int(days[i]),
+                 **{k: int(tilt[k][i]) for k in TILT_KEYS}) for i in range(n)]
 
 
 BLOCK_FRAMES = 30     # a model's frames are split into blocks of about this size, each in another city

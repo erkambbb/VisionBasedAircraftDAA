@@ -114,6 +114,19 @@ def test_apart_and_pitch():
     assert 0.40 < np.mean(p <= -8.0) < 0.52 and p.min() >= -35.0
 
 
+def test_tilt_ladder_shares_and_bounds():
+    rng = np.random.default_rng(3)
+    uav = np.array([fc.uav_attitude(rng) for _ in range(20000)])
+    for col in range(2):
+        v = np.abs(uav[:, col])
+        assert v.max() <= fc.UAV_TILT_MAX
+        assert abs(np.mean(v == 0) - 0.50) < 0.02
+        for k, (lo, hi) in enumerate([(0, 15), (15, 30), (30, 45), (45, 60)], 1):
+            assert abs(np.mean((v > lo) & (v <= hi)) - fc.TILT_PROBS[k]) < 0.02
+    own = np.array([fc.sample_pitch(rng, down=False) for _ in range(4000)])
+    assert np.abs(own).max() <= fc.OWN_PITCH_MAX and abs(np.mean(own == 0) - 0.50) < 0.03
+
+
 def test_group_plan_counts_and_resume_stable():
     names = [f"uav_{i:03d}_m" for i in range(1, 166)] + [fc.BIG_MODEL]
     plan = fc.group_plan(names, 7)
@@ -164,6 +177,8 @@ def test_unit_plan_gives_every_unit_the_same_mix():
         a = np.array([x["alt"] for x in p]) / fc.FT
         assert a.min() >= 150 and a.max() <= 1000
         assert all(171 <= x["day"] <= 264 for x in p)
+        for k in fc.TILT_KEYS:
+            assert [x[k] for x in p].count(0) == fc.quota(n, fc.TILT_PROBS)[0]
 
 
 def test_spots_stay_away_from_airports():

@@ -462,8 +462,8 @@ def sample_state(rng, infos, args, spots=None, plan=None, terrain=None, airports
     alt = plan.get("alt") or fc.sample_altitude_m(rng)
     spot, e, n, g_est = fc.sample_spot(rng, spots, args.enrange, plan.get("category"), airports)
     ground = ground_at(terrain, e, n, g_est)
-    own = Aircraft(0, e, n, ground + alt, rng.uniform(0, 360), fc.sample_pitch(rng, plan.get("down")),
-                   float(np.clip(rng.normal(0, 10), -45, 45)))
+    own = Aircraft(0, e, n, ground + alt, rng.uniform(0, 360), fc.sample_pitch(rng, plan.get("down"), plan.get("own_p")),
+                   fc.tilt_value(rng, plan.get("own_r", fc.sample_tilt_cat(rng)), fc.OWN_ROLL_MAX))
     uavs, placed = [], []
     for slot, info in enumerate(infos, 1):
         for _ in range(PLACE_TRIES):
@@ -481,6 +481,8 @@ def sample_state(rng, infos, args, spots=None, plan=None, terrain=None, airports
         placed.append((hang, vang, ang_r))
         intr = gtd.get_intruder_position(own, d_cen, hang, vang, rng.uniform(0, 360))
         intr.id = slot
+        intr.p, intr.r = fc.uav_attitude(rng, plan.get("uav_p") if slot == 1 else None,
+                                         plan.get("uav_r") if slot == 1 else None)
         if intr.u - ground_at(terrain, intr.e, intr.n, g_est) < MIN_CLEAR_M:
             return None
         uavs.append(dict(intr=intr, vang=vang, hang=hang, d_surf=d_surf, d_cen=d_cen))
